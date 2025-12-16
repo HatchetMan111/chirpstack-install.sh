@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
 #
-# Script Name: ChirpStack V4 Installer for Proxmox VE (LXC)
+# Script Name: ChirpStack V4 Installer for Proxmox VE (LXC - DHCP Only)
 # Author: Gemini (inspired by Proxmox Helper Scripts)
 # Date: 2025-12-16
-# Description: Creates a Debian 12 (Bookworm) LXC container and installs ChirpStack V4
-#              including PostgreSQL, Redis, and Mosquitto.
+# Description: Creates a Debian 12 (Bookworm) LXC container and installs ChirpStack V4.
+#              The container uses DHCP for network configuration.
 # GitHub: https://github.com/HatchetMan111/chirpstack-install.sh
 
 # --- Variablen und Konfiguration ---
@@ -16,6 +16,9 @@ LXC_HOSTNAME_DEFAULT="chirpstack"
 LXC_RAM_DEFAULT=1024
 LXC_CPU_DEFAULT=2
 LXC_DISK_DEFAULT=8
+LXC_VETH_BRIDGE="vmbr0" # Standard Proxmox Bridge
+NET_CONFIG="ip=dhcp"    # NEU: DHCP fest codiert
+LXC_IP="dhcp"           # NEU: IP für Zusammenfassung fest codiert
 
 # --- Farben und Formatierung ---
 RED='\033[0;31m'
@@ -23,7 +26,7 @@ GREEN='\033[0;32m'
 YELLOW='\033[0;33m'
 NC='\033[0m' # No Color
 
-# --- Funktionen (Unverändert, nur zur Vollständigkeit hier aufgeführt) ---
+# --- Funktionen ---
 
 function check_root() {
     if [[ $EUID -ne 0 ]]; then
@@ -47,35 +50,15 @@ function prompt_for_storage() {
 
     if ! echo $STORAGE_LIST | grep -w $LXC_STORAGE >/dev/null; then
         echo -e "${RED}Fehler: Der gewählte Storage '$LXC_STORAGE' ist ungültig oder unterstützt kein 'rootdir'.${NC}"
-        prompt_for_storage # Erneut fragen
+        prompt_for_storage
     fi
 }
-
-function prompt_for_network() {
-    echo -e "${YELLOW}Verfügbare Netzwerk-Bridges (vmbrX):${NC}"
-    BRIDGE_LIST=$(ip a | grep 'vmbr' | awk '{print $2}' | sed 's/:$//' | tr '\n' ' ')
-
-    if [ -z "$BRIDGE_LIST" ]; then
-        echo -e "${RED}Warnung: Es wurden keine 'vmbrX'-Bridges gefunden. Standard wird verwendet.${NC}"
-        LXC_VETH_BRIDGE_DEFAULT="vmbr0"
-    else
-        LXC_VETH_BRIDGE_DEFAULT=$(echo $BRIDGE_LIST | awk '{print $1}')
-        echo -e "${GREEN}[ $BRIDGE_LIST ]${NC}"
-    fi
-
-    read -rp "Netzwerk-Bridge (Standard: $LXC_VETH_BRIDGE_DEFAULT): " LXC_VETH_BRIDGE_USER
-    LXC_VETH_BRIDGE=${LXC_VETH_BRIDGE_USER:-$LXC_VETH_BRIDGE_DEFAULT}
-}
-
 
 function prompt_for_config() {
-    echo -e "${YELLOW}--- ChirpStack LXC Konfiguration ---${NC}"
+    echo -e "${YELLOW}--- ChirpStack LXC Konfiguration (Netzwerk: DHCP) ---${NC}"
 
     # Storage wählen
     prompt_for_storage
-
-    # Netzwerk-Bridge wählen
-    prompt_for_network
 
     # LXC Container ID
     read -rp "LXC Container ID (Standard: $LXC_CID_DEFAULT): " LXC_CID
@@ -96,19 +79,8 @@ function prompt_for_config() {
     LXC_RAM=${LXC_RAM:-$LXC_RAM_DEFAULT}
     read -rp "CPU-Kerne (Standard: $LXC_CPU_DEFAULT): " LXC_CPU
     LXC_CPU=${LXC_CPU:-$LXC_CPU_DEFAULT}
-
-    # Netzwerk-Konfiguration
-    read -rp "Statische IP (z.B. 192.168.1.100/24 oder 'dhcp' für dynamisch): " LXC_IP
-    if [ "$LXC_IP" != "dhcp" ]; then
-        read -rp "Gateway IP (Erforderlich bei statischer IP): " LXC_GATEWAY
-        if [ -z "$LXC_GATEWAY" ]; then
-            echo -e "${RED}Fehler: Gateway IP ist bei statischer IP zwingend erforderlich.${NC}"
-            exit 1
-        fi
-        NET_CONFIG="ip=$LXC_IP,gw=$LXC_GATEWAY"
-    else
-        NET_CONFIG="ip=dhcp"
-    fi
+    
+    # ACHTUNG: LXC_VETH_BRIDGE bleibt bei vmbr0 und NET_CONFIG bei ip=dhcp
 
     # Zusammenfassung
     echo -e "${GREEN}--- Zusammenfassung ---${NC}"
@@ -116,7 +88,7 @@ function prompt_for_config() {
     echo "Hostname: $LXC_HOSTNAME"
     echo "Storage: $LXC_STORAGE"
     echo "Netzwerk-Bridge: $LXC_VETH_BRIDGE"
-    echo "IP-Adresse: $LXC_IP (Netzwerk-Konfig: $NET_CONFIG)"
+    echo "IP-Adresse: $LXC_IP (Wird vom DHCP-Server zugewiesen)"
     echo "Ressourcen: ${LXC_CPU}x CPU, ${LXC_RAM}MB RAM, ${LXC_DISK}GB Disk"
     echo "-----------------------"
     read -rp "Bestätigen Sie die Konfiguration und starten Sie die Installation (j/n)? " -n 1 -r
@@ -145,6 +117,7 @@ function download_template() {
 function create_lxc() {
     echo -e "${GREEN}Erstelle LXC Container $LXC_CID (${LXC_HOSTNAME})...${NC}"
 
+    # Wichtig: Hier wird die fest codierte NET_CONFIG="ip=dhcp" verwendet
     pct create $LXC_CID $LXC_STORAGE:vztmpl/$LXC_TEMPLATE_NAME.tar.zst \
         --hostname $LXC_HOSTNAME \
         --cores $LXC_CPU \
@@ -163,7 +136,7 @@ function create_lxc() {
         exit 1
     fi
 
-    echo -e "${YELLOW}Warte, bis der Container gestartet ist...${NC}"
+    echo -e "${YELLOW}Warte, bis der Container gestartet ist und eine IP per DHCP zugewiesen wurde (ca. 15s)...${NC}"
     sleep 15
 }
 
@@ -198,16 +171,13 @@ function install_chirpstack() {
 }
 
 function finish_message() {
-    if [ "$LXC_IP" == "dhcp" ]; then
-        ACTUAL_IP=$(pct exec $LXC_CID ip a show eth0 | grep 'inet ' | awk '{print $2}' | cut -d/ -f1)
-    else
-        ACTUAL_IP=$(echo $LXC_IP | cut -d/ -f1)
-    fi
+    # Holt die tatsächlich zugewiesene IP-Adresse aus dem Container
+    ACTUAL_IP=$(pct exec $LXC_CID ip a show eth0 | grep 'inet ' | awk '{print $2}' | cut -d/ -f1)
 
     echo -e "${GREEN}================================================================${NC}"
     echo -e "${GREEN}🎉 ChirpStack V4 ist in Container $LXC_CID installiert!${NC}"
     echo -e "${GREEN}Hostname: $LXC_HOSTNAME${NC}"
-    echo -e "${GREEN}IP-Adresse: $ACTUAL_IP${NC}"
+    echo -e "${GREEN}Zugewiesene IP-Adresse: $ACTUAL_IP${NC}"
     echo -e "${GREEN}Weboberfläche (Standard): http://$ACTUAL_IP:8080${NC}"
     echo -e "${YELLOW}--- WICHTIG ---${NC}"
     echo -e "${YELLOW}Das PostgreSQL-Passwort ist '$DB_PASS'. Ändern Sie dies SOFORT im Container!${NC}"
