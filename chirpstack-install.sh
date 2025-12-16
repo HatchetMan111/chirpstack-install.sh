@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 #
 # Script Name: ChirpStack V4 Installer for Proxmox VE (LXC - DHCP Only)
-# Author: TheHatchetMan + Gemini (inspired by Proxmox Helper Scripts)
+# Author: Gemini (inspired by Proxmox Helper Scripts)
 # Date: 2025-12-16
 # Description: Creates a Debian 12 (Bookworm) LXC container and installs ChirpStack V4.
 #              The container uses DHCP for network configuration.
@@ -38,8 +38,8 @@ function check_root() {
 function prompt_for_storage() {
     echo -e "${YELLOW}Verfügbare Storages (müssen 'rootdir' UND 'vztmpl' unterstützen):${NC}"
     
-    # NEUE Logik: Filtert Storages, die beides unterstützen
-    STORAGE_LIST=$(pvesm status | awk '
+    # NEUE LOGIK: Fehler unterdrücken (2>/dev/null) und nur Storages mit beiden Content-Typen filtern.
+    STORAGE_LIST=$(pvesm status --enabled 1 2>/dev/null | awk '
         NR>1 {
             # Prüft, ob 'rootdir' (für das LXC RootFS) UND 'vztmpl' (für Templates) in den Content-Typen enthalten sind
             if ($4 ~ /rootdir/ && $4 ~ /vztmpl/) {
@@ -48,8 +48,8 @@ function prompt_for_storage() {
         }' | tr '\n' ' ')
     
     if [ -z "$STORAGE_LIST" ]; then
-        echo -e "${RED}Fehler: Es wurden keine Storages gefunden, die sowohl 'rootdir' als auch 'vztmpl' unterstützen.${NC}"
-        echo -e "${YELLOW}Bitte überprüfen Sie die Content-Einstellungen Ihrer Storages in der Proxmox Web-UI.${NC}"
+        echo -e "${RED}Fehler: Es wurden keine funktionierenden, lokalen oder erreichbaren Storages gefunden, die 'rootdir' und 'vztmpl' unterstützen.${NC}"
+        echo -e "${YELLOW}Bitte stellen Sie sicher, dass mindestens ein Storage (z.B. 'local' oder 'local-lvm') diese Content-Typen in der Proxmox Web-UI aktiviert hat.${NC}"
         exit 1
     fi
 
@@ -57,16 +57,14 @@ function prompt_for_storage() {
     read -rp "Storage für LXC RootFS & Templates (Standard: $(echo $STORAGE_LIST | awk '{print $1}')): " LXC_STORAGE_USER
     LXC_STORAGE=${LXC_STORAGE_USER:-$(echo $STORAGE_LIST | awk '{print $1}')}
 
-    # Überprüfung des Benutzer-Inputs gegen die gefilterte Liste
     if ! echo $STORAGE_LIST | grep -w $LXC_STORAGE >/dev/null; then
-        echo -e "${RED}Fehler: Der gewählte Storage '$LXC_STORAGE' ist ungültig oder unterstützt nicht die notwendigen Content-Typen ('rootdir', 'vztmpl').${NC}"
+        echo -e "${RED}Fehler: Der gewählte Storage '$LXC_STORAGE' ist ungültig oder unterstützt nicht die notwendigen Content-Typen.${NC}"
         prompt_for_storage
     fi
 }
 
 function prompt_for_config() {
     echo -e "${YELLOW}--- ChirpStack LXC Konfiguration (Netzwerk: DHCP) ---${NC}"
-
     prompt_for_storage
 
     read -rp "LXC Container ID (Standard: $LXC_CID_DEFAULT): " LXC_CID
@@ -105,19 +103,18 @@ function prompt_for_config() {
 function download_template() {
     echo -e "${GREEN}Lade LXC-Template ($LXC_TEMPLATE_NAME) herunter...${NC}"
     
-    # pveam list verwendet den Storage (der jetzt garantiert 'vztmpl' unterstützt)
     pveam list $LXC_STORAGE | grep "$LXC_TEMPLATE_NAME" >/dev/null
     if [ $? -ne 0 ]; then
         echo -e "${YELLOW}Template nicht im Cache gefunden. Lade von: $LXC_TEMPLATE_URL${NC}"
         pveam download $LXC_STORAGE $LXC_TEMPLATE_URL || {
-            echo -e "${RED}Fehler beim Herunterladen des Templates.${NC}"
+            echo -e "${RED}Fehler beim Herunterladen des Templates. Prüfen Sie die Netzwerkkonnektivität des Proxmox Hosts.${NC}"
             exit 1
         }
     else
         echo -e "${GREEN}Template ist bereits im Cache vorhanden.${NC}"
     fi
 }
-
+# ... (create_lxc, install_chirpstack, finish_message und Hauptlogik unverändert)
 function create_lxc() {
     echo -e "${GREEN}Erstelle LXC Container $LXC_CID (${LXC_HOSTNAME})...${NC}"
 
