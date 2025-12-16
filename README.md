@@ -6,7 +6,7 @@ ChirpStack V4 ist ein Open-Source LoRaWAN Network Server, der ideal für IoT-Anw
 
 ## ✨ Funktionen
 
-* Automatisches Herunterladen des Debian 12 (Bookworm) Templates.
+* Automatisches Herunterladen des Debian 11/12 (Bookworm) Templates.
 * Interaktive Abfrage von Container ID, Hostname, Ressourcen und Netzwerk-Einstellungen (DHCP oder statische IP).
 * Installation und Start von PostgreSQL, Redis, Mosquitto und dem ChirpStack Network Server V4.
 * Erstellt die erforderliche PostgreSQL-Datenbank und den Benutzer.
@@ -24,7 +24,7 @@ Führen Sie die folgenden Schritte direkt über SSH oder die Proxmox Shell aus.
 
 ### 1. Skript herunterladen
 
-Verwenden Sie diesen Befehl, um das Skript direkt von Ihrem GitHub-Repository herunterzuladen:
+Verwenden Sie diesen **korrigierten** Befehl, um das Skript direkt von Ihrem GitHub-Repository herunterzuladen:
 
 ```bash
 wget -qO chirpstack-install.sh [https://raw.githubusercontent.com/HatchetMan111/chirpstack-install.sh/main/chirpstack-install.sh](https://raw.githubusercontent.com/HatchetMan111/chirpstack-install.sh/main/chirpstack-install.sh)
