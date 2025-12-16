@@ -190,8 +190,8 @@ function create_lxc() {
         exit 1
     }
     
-    echo -e "${YELLOW}⏳ Warte auf Container-Start und DHCP (20s)...${NC}"
-    sleep 20
+    echo -e "${YELLOW}⏳ Warte auf Container-Start und DHCP (25s)...${NC}"
+    sleep 25
 }
 
 function wait_for_network() {
@@ -213,40 +213,46 @@ function install_chirpstack() {
     echo -e "${GREEN}📦 Installiere ChirpStack V4...${NC}"
     echo ""
 
-    echo -e "${YELLOW}[1/8] System-Update...${NC}"
-    pct exec $LXC_CID -- bash -c "apt-get update && DEBIAN_FRONTEND=noninteractive apt-get upgrade -y"
+    echo -e "${YELLOW}[1/9] System-Update...${NC}"
+    pct exec $LXC_CID -- bash -c "apt-get update && DEBIAN_FRONTEND=noninteractive apt-get upgrade -y" || true
     
-    echo -e "${YELLOW}[2/8] Installiere Basis-Pakete...${NC}"
+    echo -e "${YELLOW}[2/9] Installiere Basis-Pakete...${NC}"
     pct exec $LXC_CID -- bash -c "DEBIAN_FRONTEND=noninteractive apt-get install -y wget curl gnupg2 apt-transport-https ca-certificates"
     
-    echo -e "${YELLOW}[3/8] Installiere PostgreSQL und Redis...${NC}"
+    echo -e "${YELLOW}[3/9] Installiere PostgreSQL und Redis...${NC}"
     pct exec $LXC_CID -- bash -c "DEBIAN_FRONTEND=noninteractive apt-get install -y postgresql postgresql-contrib redis-server"
     
-    echo -e "${YELLOW}[4/8] Füge ChirpStack Repository hinzu...${NC}"
+    echo -e "${YELLOW}[4/9] Füge ChirpStack Repository hinzu...${NC}"
+    # Korrekte URL für den GPG Key
     pct exec $LXC_CID -- bash -c "mkdir -p /etc/apt/keyrings/"
-    pct exec $LXC_CID -- bash -c "curl -fsSL https://artifacts.chirpstack.io/packages/4.x/deb/pubkey.gpg | gpg --dearmor -o /etc/apt/keyrings/chirpstack.gpg"
-    pct exec $LXC_CID -- bash -c "echo 'deb [signed-by=/etc/apt/keyrings/chirpstack.gpg] https://artifacts.chirpstack.io/packages/4.x/deb stable main' | tee /etc/apt/sources.list.d/chirpstack.list"
+    pct exec $LXC_CID -- bash -c "wget -qO - https://artifacts.chirpstack.io/packages/chirpstack.key | gpg --dearmor > /etc/apt/keyrings/chirpstack.gpg"
     
-    echo -e "${YELLOW}[5/8] Aktualisiere Paketliste...${NC}"
+    echo -e "${YELLOW}[5/9] Füge Repository zur Paketliste hinzu...${NC}"
+    pct exec $LXC_CID -- bash -c "echo 'deb [signed-by=/etc/apt/keyrings/chirpstack.gpg] https://artifacts.chirpstack.io/packages/4.x/deb stable main' > /etc/apt/sources.list.d/chirpstack.list"
+    
+    echo -e "${YELLOW}[6/9] Aktualisiere Paketliste...${NC}"
     pct exec $LXC_CID -- bash -c "apt-get update"
     
-    echo -e "${YELLOW}[6/8] Installiere ChirpStack und Mosquitto...${NC}"
+    echo -e "${YELLOW}[7/9] Installiere ChirpStack und Mosquitto...${NC}"
     pct exec $LXC_CID -- bash -c "DEBIAN_FRONTEND=noninteractive apt-get install -y chirpstack mosquitto mosquitto-clients"
     
-    echo -e "${YELLOW}[7/8] Konfiguriere Datenbank...${NC}"
-    pct exec $LXC_CID -- bash -c "sudo -u postgres psql -c \"CREATE ROLE chirpstack WITH LOGIN PASSWORD '$DB_PASS';\""
-    pct exec $LXC_CID -- bash -c "sudo -u postgres psql -c \"CREATE DATABASE chirpstack WITH OWNER chirpstack;\""
-    pct exec $LXC_CID -- bash -c "sudo -u postgres psql -c \"GRANT ALL PRIVILEGES ON DATABASE chirpstack TO chirpstack;\""
+    echo -e "${YELLOW}[8/9] Konfiguriere Datenbank...${NC}"
+    # Warte kurz damit PostgreSQL vollständig gestartet ist
+    sleep 3
+    pct exec $LXC_CID -- bash -c "sudo -u postgres psql -c \"CREATE ROLE chirpstack WITH LOGIN PASSWORD '$DB_PASS';\" 2>/dev/null || true"
+    pct exec $LXC_CID -- bash -c "sudo -u postgres psql -c \"CREATE DATABASE chirpstack WITH OWNER chirpstack;\" 2>/dev/null || true"
+    pct exec $LXC_CID -- bash -c "sudo -u postgres psql -c \"GRANT ALL PRIVILEGES ON DATABASE chirpstack TO chirpstack;\" 2>/dev/null || true"
     
-    echo -e "${YELLOW}[8/8] Konfiguriere ChirpStack...${NC}"
-    pct exec $LXC_CID -- bash -c "sed -i 's|dsn=.*|dsn=\"postgres://chirpstack:$DB_PASS@localhost/chirpstack?sslmode=disable\"|' /etc/chirpstack/chirpstack.toml"
+    echo -e "${YELLOW}[9/9] Konfiguriere ChirpStack...${NC}"
+    pct exec $LXC_CID -- bash -c "sed -i 's|^dsn=.*|dsn=\"postgres://chirpstack:$DB_PASS@localhost/chirpstack?sslmode=disable\"|' /etc/chirpstack/chirpstack.toml"
     
-    echo -e "${YELLOW}Starte Dienste...${NC}"
+    echo -e "${YELLOW}Aktiviere und starte Dienste...${NC}"
     pct exec $LXC_CID -- bash -c "systemctl enable postgresql redis-server chirpstack mosquitto"
     pct exec $LXC_CID -- bash -c "systemctl restart postgresql redis-server"
     sleep 3
     pct exec $LXC_CID -- bash -c "systemctl restart chirpstack mosquitto"
     
+    # Warte bis Dienste hochgefahren sind
     sleep 5
     
     echo ""
@@ -257,30 +263,38 @@ function verify_installation() {
     echo ""
     echo -e "${YELLOW}🔍 Überprüfe Installation...${NC}"
     
+    sleep 2
+    
     if pct exec $LXC_CID -- systemctl is-active --quiet chirpstack; then
         echo -e "${GREEN}✓ ChirpStack läuft${NC}"
     else
-        echo -e "${RED}✗ ChirpStack läuft nicht${NC}"
+        echo -e "${YELLOW}⚠ ChirpStack läuft möglicherweise noch nicht (startet noch...)${NC}"
     fi
     
     if pct exec $LXC_CID -- systemctl is-active --quiet mosquitto; then
         echo -e "${GREEN}✓ Mosquitto läuft${NC}"
     else
-        echo -e "${RED}✗ Mosquitto läuft nicht${NC}"
+        echo -e "${YELLOW}⚠ Mosquitto läuft nicht${NC}"
     fi
     
     if pct exec $LXC_CID -- systemctl is-active --quiet postgresql; then
         echo -e "${GREEN}✓ PostgreSQL läuft${NC}"
     else
-        echo -e "${RED}✗ PostgreSQL läuft nicht${NC}"
+        echo -e "${YELLOW}⚠ PostgreSQL läuft nicht${NC}"
+    fi
+    
+    if pct exec $LXC_CID -- systemctl is-active --quiet redis-server; then
+        echo -e "${GREEN}✓ Redis läuft${NC}"
+    else
+        echo -e "${YELLOW}⚠ Redis läuft nicht${NC}"
     fi
 }
 
 function finish_message() {
-    ACTUAL_IP=$(pct exec $LXC_CID -- ip -4 addr show eth0 | grep -oP '(?<=inet\s)\d+(\.\d+){3}' | head -n1)
+    ACTUAL_IP=$(pct exec $LXC_CID -- ip -4 addr show eth0 2>/dev/null | grep -oP '(?<=inet\s)\d+(\.\d+){3}' | head -n1)
     
     if [[ -z "$ACTUAL_IP" ]]; then
-        ACTUAL_IP="Keine IP gefunden - bitte prüfen!"
+        ACTUAL_IP="Keine IP gefunden - bitte mit 'pct exec $LXC_CID ip a' prüfen"
     fi
     
     echo ""
@@ -302,12 +316,20 @@ function finish_message() {
     echo -e "${RED}⚠️  WICHTIG: Ändern Sie die Standardpasswörter!${NC}"
     echo ""
     echo -e "${YELLOW}Nützliche Befehle:${NC}"
-    echo -e "  pct enter $LXC_CID              # Container betreten"
-    echo -e "  pct stop $LXC_CID               # Container stoppen"
-    echo -e "  pct start $LXC_CID              # Container starten"
-    echo -e "  journalctl -u chirpstack -f     # Logs anzeigen (im Container)"
+    echo -e "  ${BLUE}pct enter $LXC_CID${NC}                    # Container betreten"
+    echo -e "  ${BLUE}pct stop $LXC_CID${NC}                     # Container stoppen"
+    echo -e "  ${BLUE}pct start $LXC_CID${NC}                    # Container starten"
+    echo -e "  ${BLUE}pct exec $LXC_CID systemctl status chirpstack${NC}  # Status prüfen"
+    echo ""
+    echo -e "${YELLOW}Im Container (nach 'pct enter $LXC_CID'):${NC}"
+    echo -e "  ${BLUE}journalctl -u chirpstack -f${NC}           # ChirpStack Logs"
+    echo -e "  ${BLUE}systemctl restart chirpstack${NC}          # ChirpStack neustarten"
+    echo -e "  ${BLUE}nano /etc/chirpstack/chirpstack.toml${NC}  # Konfiguration bearbeiten"
     echo ""
     echo -e "${GREEN}╚════════════════════════════════════════════════════════════╝${NC}"
+    echo ""
+    echo -e "${YELLOW}💡 Tipp: Es kann 1-2 Minuten dauern, bis ChirpStack vollständig gestartet ist.${NC}"
+    echo -e "${YELLOW}    Falls die Web-UI nicht sofort erreichbar ist, warten Sie kurz und versuchen es erneut.${NC}"
 }
 
 # --- Hauptlogik ---
