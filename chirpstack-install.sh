@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
 #
-# Script Name: ChirpStack V4 Installer for Proxmox VE (LXC - DHCP Only)
+# Script Name: ChirpStack V4 Installer for Proxmox VE (LXC - Fixed Storage/DHCP)
 # Author: Gemini (inspired by Proxmox Helper Scripts)
 # Date: 2025-12-16
 # Description: Creates a Debian 12 (Bookworm) LXC container and installs ChirpStack V4.
-#              The container uses DHCP for network configuration, focusing on local-lvm.
+#              Storage and network settings are fixed for robustness (local-lvm / DHCP).
 # GitHub: https://github.com/HatchetMan111/chirpstack-install.sh
 
 # --- Variablen und Konfiguration ---
@@ -16,10 +16,12 @@ LXC_HOSTNAME_DEFAULT="chirpstack"
 LXC_RAM_DEFAULT=1024
 LXC_CPU_DEFAULT=2
 LXC_DISK_DEFAULT=8
-LXC_STORAGE_DEFAULT="local-lvm" # NEU: Standard auf LVM gesetzt
-LXC_VETH_BRIDGE="vmbr0"
-NET_CONFIG="ip=dhcp"
-LXC_IP="dhcp"
+
+# Feste Werte, um Fehler zu vermeiden:
+LXC_STORAGE="local-lvm" # <-- FESTGELEGT
+LXC_VETH_BRIDGE="vmbr0" # <-- FESTGELEGT
+NET_CONFIG="ip=dhcp"    
+LXC_IP="dhcp"           
 
 # --- Farben und Formatierung ---
 RED='\033[0;31m'
@@ -36,49 +38,11 @@ function check_root() {
     fi
 }
 
-function check_storage_content() {
-    local storage=$1
-    # Prüft, ob der Storage aktiv ist und die notwendigen Content-Typen unterstützt.
-    # pvesm status muss die Ausgabe für den Storage liefern.
-    local content_check=$(pvesm status --enabled 1 2>/dev/null | grep -E "^$storage\s" | awk '{print $4}')
-    
-    if [[ "$content_check" == "" ]]; then
-        echo -e "${RED}Fehler: Storage '$storage' existiert nicht oder ist nicht aktiv.${NC}"
-        return 1
-    fi
-
-    if [[ "$content_check" != *"rootdir"* ]]; then
-        echo -e "${RED}Fehler: Storage '$storage' unterstützt nicht 'rootdir' (für das Container-Dateisystem).${NC}"
-        return 1
-    fi
-
-    if [[ "$content_check" != *"vztmpl"* ]]; then
-        echo -e "${RED}Fehler: Storage '$storage' unterstützt nicht 'vztmpl' (für Templates).${NC}"
-        return 1
-    fi
-    return 0
-}
-
-
-function prompt_for_storage() {
-    echo -e "${YELLOW}--- Storage Konfiguration ---${NC}"
-    
-    # 1. Benutzer fragen, Standard ist local-lvm
-    read -rp "Storage für LXC (muss 'rootdir' & 'vztmpl' unterstützen, Standard: $LXC_STORAGE_DEFAULT): " LXC_STORAGE_USER
-    LXC_STORAGE=${LXC_STORAGE_USER:-$LXC_STORAGE_DEFAULT}
-
-    # 2. Storage prüfen
-    if ! check_storage_content "$LXC_STORAGE"; then
-        echo -e "${RED}Der gewählte Storage '$LXC_STORAGE' ist ungültig. Bitte erneut versuchen.${NC}"
-        prompt_for_storage # Erneut fragen
-    fi
-}
+# HINWEIS: prompt_for_storage wurde entfernt!
 
 function prompt_for_config() {
-    echo -e "${YELLOW}--- ChirpStack LXC Konfiguration (Netzwerk: DHCP) ---${NC}"
-
-    # Storage wählen
-    prompt_for_storage
+    echo -e "${YELLOW}--- ChirpStack LXC Konfiguration ---${NC}"
+    echo -e "${GREEN}Verwendet Storage: $LXC_STORAGE, Netzwerk: DHCP über $LXC_VETH_BRIDGE.${NC}"
 
     read -rp "LXC Container ID (Standard: $LXC_CID_DEFAULT): " LXC_CID
     LXC_CID=${LXC_CID:-$LXC_CID_DEFAULT}
@@ -101,7 +65,6 @@ function prompt_for_config() {
     echo "Container ID: $LXC_CID"
     echo "Hostname: $LXC_HOSTNAME"
     echo "Storage: $LXC_STORAGE"
-    echo "Netzwerk-Bridge: $LXC_VETH_BRIDGE"
     echo "IP-Adresse: $LXC_IP (Wird vom DHCP-Server zugewiesen)"
     echo "Ressourcen: ${LXC_CPU}x CPU, ${LXC_RAM}MB RAM, ${LXC_DISK}GB Disk"
     echo "-----------------------"
@@ -116,11 +79,13 @@ function prompt_for_config() {
 function download_template() {
     echo -e "${GREEN}Lade LXC-Template ($LXC_TEMPLATE_NAME) herunter...${NC}"
     
-    pveam list $LXC_STORAGE | grep "$LXC_TEMPLATE_NAME" >/dev/null
+    # Hier wird der feste $LXC_STORAGE='local-lvm' verwendet.
+    pveam list $LXC_STORAGE | grep "$LXC_TEMPLATE_NAME" >/dev/null 
     if [ $? -ne 0 ]; then
         echo -e "${YELLOW}Template nicht im Cache gefunden. Lade von: $LXC_TEMPLATE_URL${NC}"
+        # Fehler von pveam download werden von der Shell unterdrückt, da das Hauptskript das tut.
         pveam download $LXC_STORAGE $LXC_TEMPLATE_URL || {
-            echo -e "${RED}Fehler beim Herunterladen des Templates. Prüfen Sie die Netzwerkkonnektivität des Proxmox Hosts.${NC}"
+            echo -e "${RED}Fehler beim Herunterladen des Templates. Prüfen Sie, ob '$LXC_STORAGE' aktiv ist und 'vztmpl' unterstützt.${NC}"
             exit 1
         }
     else
@@ -128,7 +93,6 @@ function download_template() {
     fi
 }
 
-# ... (create_lxc, install_chirpstack, finish_message und Hauptlogik unverändert)
 function create_lxc() {
     echo -e "${GREEN}Erstelle LXC Container $LXC_CID (${LXC_HOSTNAME})...${NC}"
 
