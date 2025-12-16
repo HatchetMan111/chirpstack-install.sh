@@ -3,14 +3,14 @@
 # Script Name: ChirpStack V4 Installer for Proxmox VE (LXC)
 # Author: Gemini (inspired by Proxmox Helper Scripts)
 # Date: 2025-12-16
-# Description: Creates a Debian 12 (Bookworm) LXC container and installs ChirpStack V4.
-# GitHub: [Ihr GitHub-Repository-Link hier]
+# Description: Creates a Debian 12 (Bookworm) LXC container and installs ChirpStack V4
+#              including PostgreSQL, Redis, and Mosquitto.
+# GitHub: https://github.com/HatchetMan111/chirpstack-install.sh
 
 # --- Variablen und Konfiguration ---
 LXC_TEMPLATE_URL="https://community-templates.github.io/templates/debian-12-standard_12.5-1_amd64.tar.zst"
 LXC_TEMPLATE_NAME="debian-12-standard"
-LXC_STORAGE="local-lvm" # Passt den Storage-Namen an Ihren Proxmox-Server an
-LXC_VETH_BRIDGE="vmbr0" # Passt die Bridge an Ihre Proxmox-Konfiguration an
+DB_PASS="dbpassword" # ACHTUNG: Standardpasswort! MUSS nach der Installation geändert werden!
 LXC_CID_DEFAULT=900
 LXC_HOSTNAME_DEFAULT="chirpstack"
 LXC_RAM_DEFAULT=1024
@@ -23,7 +23,7 @@ GREEN='\033[0;32m'
 YELLOW='\033[0;33m'
 NC='\033[0m' # No Color
 
-# --- Funktionen ---
+# --- Funktionen (Unverändert, nur zur Vollständigkeit hier aufgeführt) ---
 
 function check_root() {
     if [[ $EUID -ne 0 ]]; then
@@ -32,23 +32,63 @@ function check_root() {
     fi
 }
 
+function prompt_for_storage() {
+    echo -e "${YELLOW}Verfügbare Storages (Root Directory):${NC}"
+    STORAGE_LIST=$(pvesm status -content rootdir | awk 'NR>1 {print $1}' | tr '\n' ' ')
+    
+    if [ -z "$STORAGE_LIST" ]; then
+        echo -e "${RED}Fehler: Es wurden keine Storages mit 'rootdir'-Content gefunden.${NC}"
+        exit 1
+    fi
+
+    echo -e "${GREEN}[ $STORAGE_LIST ]${NC}"
+    read -rp "Storage für LXC RootFS (Standard: $(echo $STORAGE_LIST | awk '{print $1}')): " LXC_STORAGE_USER
+    LXC_STORAGE=${LXC_STORAGE_USER:-$(echo $STORAGE_LIST | awk '{print $1}')}
+
+    if ! echo $STORAGE_LIST | grep -w $LXC_STORAGE >/dev/null; then
+        echo -e "${RED}Fehler: Der gewählte Storage '$LXC_STORAGE' ist ungültig oder unterstützt kein 'rootdir'.${NC}"
+        prompt_for_storage # Erneut fragen
+    fi
+}
+
+function prompt_for_network() {
+    echo -e "${YELLOW}Verfügbare Netzwerk-Bridges (vmbrX):${NC}"
+    BRIDGE_LIST=$(ip a | grep 'vmbr' | awk '{print $2}' | sed 's/:$//' | tr '\n' ' ')
+
+    if [ -z "$BRIDGE_LIST" ]; then
+        echo -e "${RED}Warnung: Es wurden keine 'vmbrX'-Bridges gefunden. Standard wird verwendet.${NC}"
+        LXC_VETH_BRIDGE_DEFAULT="vmbr0"
+    else
+        LXC_VETH_BRIDGE_DEFAULT=$(echo $BRIDGE_LIST | awk '{print $1}')
+        echo -e "${GREEN}[ $BRIDGE_LIST ]${NC}"
+    fi
+
+    read -rp "Netzwerk-Bridge (Standard: $LXC_VETH_BRIDGE_DEFAULT): " LXC_VETH_BRIDGE_USER
+    LXC_VETH_BRIDGE=${LXC_VETH_BRIDGE_USER:-$LXC_VETH_BRIDGE_DEFAULT}
+}
+
+
 function prompt_for_config() {
     echo -e "${YELLOW}--- ChirpStack LXC Konfiguration ---${NC}"
+
+    # Storage wählen
+    prompt_for_storage
+
+    # Netzwerk-Bridge wählen
+    prompt_for_network
 
     # LXC Container ID
     read -rp "LXC Container ID (Standard: $LXC_CID_DEFAULT): " LXC_CID
     LXC_CID=${LXC_CID:-$LXC_CID_DEFAULT}
+    if pct status $LXC_CID &> /dev/null; then
+        echo -e "${RED}Fehler: Container ID $LXC_CID ist bereits in Verwendung.${NC}"
+        exit 1
+    fi
 
     # Hostname
     read -rp "Hostname (Standard: $LXC_HOSTNAME_DEFAULT): " LXC_HOSTNAME
     LXC_HOSTNAME=${LXC_HOSTNAME:-$LXC_HOSTNAME_DEFAULT}
 
-    # Storage
-    echo -e "Verfügbare Storages:"
-    pvesm status -content rootdir | awk 'NR>1 {print $1}'
-    read -rp "Storage (Standard: $LXC_STORAGE): " LXC_STORAGE_USER
-    LXC_STORAGE=${LXC_STORAGE_USER:-$LXC_STORAGE}
-    
     # Ressourcen
     read -rp "Speichergröße in GB (Standard: $LXC_DISK_DEFAULT): " LXC_DISK
     LXC_DISK=${LXC_DISK:-$LXC_DISK_DEFAULT}
@@ -57,20 +97,29 @@ function prompt_for_config() {
     read -rp "CPU-Kerne (Standard: $LXC_CPU_DEFAULT): " LXC_CPU
     LXC_CPU=${LXC_CPU:-$LXC_CPU_DEFAULT}
 
-    # Netzwerk
-    read -rp "Netzwerk-Bridge (Standard: $LXC_VETH_BRIDGE): " LXC_VETH_BRIDGE_USER
-    LXC_VETH_BRIDGE=${LXC_VETH_BRIDGE_USER:-$LXC_VETH_BRIDGE}
-    read -rp "Statische IP (z.B. 192.168.1.100/24 oder 'dhcp'): " LXC_IP
-    read -rp "Gateway IP (Erforderlich bei statischer IP): " LXC_GATEWAY
+    # Netzwerk-Konfiguration
+    read -rp "Statische IP (z.B. 192.168.1.100/24 oder 'dhcp' für dynamisch): " LXC_IP
+    if [ "$LXC_IP" != "dhcp" ]; then
+        read -rp "Gateway IP (Erforderlich bei statischer IP): " LXC_GATEWAY
+        if [ -z "$LXC_GATEWAY" ]; then
+            echo -e "${RED}Fehler: Gateway IP ist bei statischer IP zwingend erforderlich.${NC}"
+            exit 1
+        fi
+        NET_CONFIG="ip=$LXC_IP,gw=$LXC_GATEWAY"
+    else
+        NET_CONFIG="ip=dhcp"
+    fi
 
     # Zusammenfassung
     echo -e "${GREEN}--- Zusammenfassung ---${NC}"
     echo "Container ID: $LXC_CID"
     echo "Hostname: $LXC_HOSTNAME"
     echo "Storage: $LXC_STORAGE"
-    echo "IP-Adresse: $LXC_IP"
+    echo "Netzwerk-Bridge: $LXC_VETH_BRIDGE"
+    echo "IP-Adresse: $LXC_IP (Netzwerk-Konfig: $NET_CONFIG)"
+    echo "Ressourcen: ${LXC_CPU}x CPU, ${LXC_RAM}MB RAM, ${LXC_DISK}GB Disk"
     echo "-----------------------"
-    read -rp "Bestätigen Sie die Konfiguration (j/n)? " -n 1 -r
+    read -rp "Bestätigen Sie die Konfiguration und starten Sie die Installation (j/n)? " -n 1 -r
     echo
     if [[ ! $REPLY =~ ^[Jj]$ ]]; then
         echo -e "${RED}Installation abgebrochen.${NC}"
@@ -79,15 +128,17 @@ function prompt_for_config() {
 }
 
 function download_template() {
-    echo -e "${GREEN}Lade LXC-Template herunter...${NC}"
-    pveam available --section system | grep $LXC_TEMPLATE_NAME >/dev/null
+    echo -e "${GREEN}Lade LXC-Template ($LXC_TEMPLATE_NAME) herunter...${NC}"
+    
+    pveam list $LXC_STORAGE | grep "$LXC_TEMPLATE_NAME" >/dev/null
     if [ $? -ne 0 ]; then
-        echo -e "${YELLOW}Template nicht gefunden. Versuche Download von extern...${NC}"
-        # Alternative Download-Methode, falls nicht in den Standard-Repos
+        echo -e "${YELLOW}Template nicht im Cache gefunden. Lade von: $LXC_TEMPLATE_URL${NC}"
         pveam download $LXC_STORAGE $LXC_TEMPLATE_URL || {
             echo -e "${RED}Fehler beim Herunterladen des Templates.${NC}"
             exit 1
         }
+    else
+        echo -e "${GREEN}Template ist bereits im Cache vorhanden.${NC}"
     fi
 }
 
@@ -101,52 +152,45 @@ function create_lxc() {
         --rootfs $LXC_STORAGE:$LXC_DISK \
         --swap 0 \
         --unprivileged 0 \
-        --net0 name=eth0,bridge=$LXC_VETH_BRIDGE,ip=$LXC_IP,gw=$LXC_GATEWAY,type=veth \
+        --net0 name=eth0,bridge=$LXC_VETH_BRIDGE,$NET_CONFIG,type=veth \
         --features nesting=1 \
-        --ostype debian
+        --ostype debian \
+        --onboot 1 \
+        --start 1
 
     if [ $? -ne 0 ]; then
         echo -e "${RED}Fehler bei der Erstellung des Containers.${NC}"
         exit 1
     fi
 
-    # Setze Root-Passwort und starte Container
-    pct set $LXC_CID --password 'proxmox' # Bitte ändern Sie dieses Standardpasswort
-    pct start $LXC_CID
-
-    # Warte auf Start und IP-Zuweisung
     echo -e "${YELLOW}Warte, bis der Container gestartet ist...${NC}"
-    sleep 10
+    sleep 15
 }
 
 function install_chirpstack() {
     echo -e "${GREEN}Starte ChirpStack Installation im Container...${NC}"
 
-    # Alle Installationsbefehle als einzelne pct exec-Befehle
     # 1. Update und Abhängigkeiten
     pct exec $LXC_CID -- bash -c "apt update && apt upgrade -y"
-    pct exec $LXC_CID -- bash -c "apt install -y wget curl gnupg postgresql postgresql-contrib redis-server"
+    pct exec $LXC_CID -- bash -c "DEBIAN_FRONTEND=noninteractive apt install -y wget curl gnupg postgresql postgresql-contrib redis-server"
 
-    # 2. ChirpStack Repository hinzufügen (Debian)
+    # 2. ChirpStack Repository hinzufügen
     pct exec $LXC_CID -- bash -c "mkdir -p /etc/apt/keyrings/"
     pct exec $LXC_CID -- bash -c "wget -q -O - https://artifacts.chirpstack.io/packages/chirpstack.key | gpg --dearmor > /etc/apt/keyrings/chirpstack.gpg"
     pct exec $LXC_CID -- bash -c "echo \"deb [signed-by=/etc/apt/keyrings/chirpstack.gpg] https://artifacts.chirpstack.io/packages/4.x/deb stable main\" | tee /etc/apt/sources.list.d/chirpstack.list"
     pct exec $LXC_CID -- bash -c "apt update"
 
-    # 3. ChirpStack und Mosquitto installieren (Mosquitto ist oft hilfreich)
-    pct exec $LXC_CID -- bash -c "apt install -y chirpstack mosquitto"
+    # 3. ChirpStack und Mosquitto installieren
+    pct exec $LXC_CID -- bash -c "DEBIAN_FRONTEND=noninteractive apt install -y chirpstack mosquitto"
 
     # 4. PostgreSQL Konfiguration (DB und User erstellen)
-    # Wichtig: ChirpStack erfordert oft spezifische Konfigurationsschritte für PostgreSQL/Redis,
-    # die hier stark vereinfacht sind. Dies sollte in einer echten Version detaillierter sein!
-    pct exec $LXC_CID -- bash -c "sudo -u postgres psql -c \"CREATE USER chirpstack WITH PASSWORD 'dbpassword';\""
+    pct exec $LXC_CID -- bash -c "sudo -u postgres psql -c \"CREATE USER chirpstack WITH PASSWORD '$DB_PASS';\""
     pct exec $LXC_CID -- bash -c "sudo -u postgres psql -c \"CREATE DATABASE chirpstack WITH OWNER chirpstack;\""
 
-    # 5. ChirpStack Konfigurationsanpassung (Beispiel für DB-Verbindung)
-    # Ersetzen Sie 'dbpassword' durch das tatsächliche Passwort.
-    pct exec $LXC_CID -- bash -c "sed -i 's/^dsn=\/.*$/dsn=\"postgres:\/\/chirpstack:dbpassword@localhost\/chirpstack?sslmode=disable\"/' /etc/chirpstack/chirpstack.toml"
+    # 5. ChirpStack Konfigurationsanpassung (DB-Verbindung)
+    pct exec $LXC_CID -- bash -c "sed -i 's/^dsn=.*$/dsn=\"postgres:\/\/chirpstack:$DB_PASS@localhost\/chirpstack?sslmode=disable\"/' /etc/chirpstack/chirpstack.toml"
 
-    # 6. Dienste starten
+    # 6. Dienste starten und für automatischen Start aktivieren
     pct exec $LXC_CID -- bash -c "systemctl enable postgresql redis chirpstack mosquitto"
     pct exec $LXC_CID -- bash -c "systemctl start postgresql redis chirpstack mosquitto"
 
@@ -154,12 +198,20 @@ function install_chirpstack() {
 }
 
 function finish_message() {
+    if [ "$LXC_IP" == "dhcp" ]; then
+        ACTUAL_IP=$(pct exec $LXC_CID ip a show eth0 | grep 'inet ' | awk '{print $2}' | cut -d/ -f1)
+    else
+        ACTUAL_IP=$(echo $LXC_IP | cut -d/ -f1)
+    fi
+
     echo -e "${GREEN}================================================================${NC}"
     echo -e "${GREEN}🎉 ChirpStack V4 ist in Container $LXC_CID installiert!${NC}"
     echo -e "${GREEN}Hostname: $LXC_HOSTNAME${NC}"
-    echo -e "${GREEN}IP-Adresse: $LXC_IP${NC}"
-    echo -e "${GREEN}Weboberfläche (Standard): http://$LXC_IP:8080${NC}"
-    echo -e "${YELLOW}Bitte passen Sie die ChirpStack Konfiguration (/etc/chirpstack/chirpstack.toml) an, insbesondere die Zugangsdaten und die MQTT-Einstellungen.${NC}"
+    echo -e "${GREEN}IP-Adresse: $ACTUAL_IP${NC}"
+    echo -e "${GREEN}Weboberfläche (Standard): http://$ACTUAL_IP:8080${NC}"
+    echo -e "${YELLOW}--- WICHTIG ---${NC}"
+    echo -e "${YELLOW}Das PostgreSQL-Passwort ist '$DB_PASS'. Ändern Sie dies SOFORT im Container!${NC}"
+    echo -e "${YELLOW}Login Web UI: admin / admin${NC}"
     echo -e "${GREEN}================================================================${NC}"
 }
 
@@ -170,5 +222,3 @@ download_template
 create_lxc
 install_chirpstack
 finish_message
-
-# --- Ende des Skripts ---
