@@ -17,9 +17,9 @@ LXC_RAM_DEFAULT=1024
 LXC_CPU_DEFAULT=2
 LXC_DISK_DEFAULT=8
 
-# NEU: Trennung der Storages für Robustheit
-LXC_STORAGE="local-lvm"      # <-- Für das Container RootFS (braucht rootdir)
-LXC_TEMPLATE_STORAGE="local" # <-- Für das Template (braucht vztmpl)
+# STANDARDS: local-lvm für die Root-Disk, local für Templates
+LXC_STORAGE="local-lvm"      # <-- Container RootFS (braucht rootdir)
+LXC_TEMPLATE_STORAGE="local" # <-- Template (braucht vztmpl)
 LXC_VETH_BRIDGE="vmbr0"
 NET_CONFIG="ip=dhcp"    
 LXC_IP="dhcp"           
@@ -39,7 +39,6 @@ function check_root() {
     fi
 }
 
-# NEU: Überprüfung der festen Storage-Werte
 function check_fixed_storage() {
     # 1. Prüfe, ob LXC_STORAGE (local-lvm) rootdir unterstützt
     if ! pvesm status --enabled 1 2>/dev/null | grep -E "^$LXC_STORAGE\s" | awk '{print $4}' | grep -q 'rootdir'; then
@@ -49,18 +48,16 @@ function check_fixed_storage() {
     # 2. Prüfe, ob LXC_TEMPLATE_STORAGE (local) vztmpl unterstützt
     if ! pvesm status --enabled 1 2>/dev/null | grep -E "^$LXC_TEMPLATE_STORAGE\s" | awk '{print $4}' | grep -q 'vztmpl'; then
         echo -e "${RED}Fehler: Der Template-Storage '$LXC_TEMPLATE_STORAGE' existiert nicht, ist inaktiv oder unterstützt nicht 'vztmpl'.${NC}"
-        echo -e "${YELLOW}Hinweis: Templates müssen auf einem Verzeichnis-Storage (wie 'local') gespeichert werden, nicht auf LVM/ZFS.${NC}"
+        echo -e "${YELLOW}Hinweis: Templates müssen auf einem Verzeichnis-Storage (wie 'local') gespeichert werden.${NC}"
         exit 1
     fi
 }
 
-
 function prompt_for_config() {
     echo -e "${YELLOW}--- ChirpStack LXC Konfiguration ---${NC}"
-    echo -e "${GREEN}Verwendet RootFS-Storage: $LXC_STORAGE, Template-Storage: $LXC_TEMPLATE_STORAGE, Netzwerk: DHCP über $LXC_VETH_BRIDGE.${NC}"
+    echo -e "${GREEN}RootFS: $LXC_STORAGE, Templates: $LXC_TEMPLATE_STORAGE, Netzwerk: DHCP über $LXC_VETH_BRIDGE.${NC}"
 
-    # Führe die notwendigen Prüfungen vor der Abfrage durch
-    check_fixed_storage
+    check_fixed_storage # Führt die Prüfung durch
 
     read -rp "LXC Container ID (Standard: $LXC_CID_DEFAULT): " LXC_CID
     LXC_CID=${LXC_CID:-$LXC_CID_DEFAULT}
@@ -102,6 +99,7 @@ function download_template() {
     if [ $? -ne 0 ]; then
         echo -e "${YELLOW}Template nicht im Cache gefunden. Lade in '$LXC_TEMPLATE_STORAGE' herunter von: $LXC_TEMPLATE_URL${NC}"
         pveam download $LXC_TEMPLATE_STORAGE $LXC_TEMPLATE_URL || {
+            # KORREKTUR: Fehlermeldung verwendet jetzt $LXC_TEMPLATE_STORAGE
             echo -e "${RED}Fehler beim Herunterladen des Templates. Prüfen Sie, ob '$LXC_TEMPLATE_STORAGE' aktiv ist und 'vztmpl' unterstützt.${NC}"
             exit 1
         }
@@ -113,8 +111,7 @@ function download_template() {
 function create_lxc() {
     echo -e "${GREEN}Erstelle LXC Container $LXC_CID (${LXC_HOSTNAME})...${NC}"
 
-    # Hier verwenden wir LXC_TEMPLATE_STORAGE, um das Template zu finden, 
-    # aber LXC_STORAGE für das RootFS.
+    # Template-Pfad verwendet $LXC_TEMPLATE_STORAGE, RootFS verwendet $LXC_STORAGE
     pct create $LXC_CID $LXC_TEMPLATE_STORAGE:vztmpl/$LXC_TEMPLATE_NAME.tar.zst \
         --hostname $LXC_HOSTNAME \
         --cores $LXC_CPU \
@@ -136,8 +133,6 @@ function create_lxc() {
     echo -e "${YELLOW}Warte, bis der Container gestartet ist und eine IP per DHCP zugewiesen wurde (ca. 15s)...${NC}"
     sleep 15
 }
-
-# --- Der Rest des Skripts (install_chirpstack, finish_message, Hauptlogik) bleibt unverändert ---
 
 function install_chirpstack() {
     echo -e "${GREEN}Starte ChirpStack Installation im Container...${NC}"
