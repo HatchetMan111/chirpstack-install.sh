@@ -79,6 +79,15 @@ function prompt_for_config() {
     read -rp "Hostname (Standard: $LXC_HOSTNAME_DEFAULT): " LXC_HOSTNAME
     LXC_HOSTNAME=${LXC_HOSTNAME:-$LXC_HOSTNAME_DEFAULT}
 
+    read -rp "Speichergröße in GB (Standard: $LXC_DISK_DEFAULT): " LXC_DISK
+    LXC_DISK=${LXC_DISK:-$LXC_DISK_DEFAULT}
+    
+    read -rp "Arbeitsspeicher in MB (Standard: $LXC_RAM_DEFAULT): " LXC_RAM
+    LXC_RAM=${LXC_RAM:-$LXC_RAM_DEFAULT}
+    
+    read -rp "CPU-Kerne (Standard: $LXC_CPU_DEFAULT): " LXC_CPU
+    LXC_CPU=${LXC_CPU:-$LXC_CPU_DEFAULT}
+
     read -rp "Root-Passwort für Container (Standard: $ROOT_PASS): " CUSTOM_ROOT_PASS
     ROOT_PASS=${CUSTOM_ROOT_PASS:-$ROOT_PASS}
     
@@ -125,8 +134,8 @@ function create_lxc() {
 
     pct create $LXC_CID "$LXC_TEMPLATE_STORAGE:vztmpl/$LXC_TEMPLATE_NAME" \
         --hostname "$LXC_HOSTNAME" \
-        --cores "$LXC_CPU" \
-        --memory "$LXC_RAM" \
+        --cores $LXC_CPU \
+        --memory $LXC_RAM \
         --rootfs "$LXC_STORAGE:$LXC_DISK" \
         --swap 512 \
         --unprivileged 1 \
@@ -171,7 +180,6 @@ function install_chirpstack() {
     sleep 10
     
     echo -e "${YELLOW}[8/10] Erstelle Datenbank...${NC}"
-    # Erstelle User und Datenbank
     pct exec $LXC_CID -- bash -c "sudo -u postgres psql <<EOF
 DROP DATABASE IF EXISTS chirpstack;
 DROP ROLE IF EXISTS chirpstack;
@@ -185,10 +193,8 @@ GRANT ALL ON SCHEMA public TO chirpstack;
 EOF"
     
     echo -e "${YELLOW}[9/10] Konfiguriere ChirpStack...${NC}"
-    # Backup der Original-Config
     pct exec $LXC_CID -- bash -c "cp /etc/chirpstack/chirpstack.toml /etc/chirpstack/chirpstack.toml.bak"
     
-    # Setze die Datenbank-Verbindung korrekt
     pct exec $LXC_CID -- bash -c "cat > /etc/chirpstack/chirpstack.toml <<'EOFCONFIG'
 [logging]
 level=\"info\"
@@ -224,7 +230,6 @@ event_topic_template=\"application/{{ application_id }}/device/{{ dev_eui }}/eve
 command_topic_template=\"application/{{ application_id }}/device/{{ dev_eui }}/command/{{ command }}\"
 EOFCONFIG"
     
-    # Ersetze das Passwort in der Config
     pct exec $LXC_CID -- bash -c "sed -i 's/\$DB_PASS/$DB_PASS/g' /etc/chirpstack/chirpstack.toml"
     
     echo -e "${YELLOW}[10/10] Starte Dienste...${NC}"
@@ -244,26 +249,25 @@ function verify_installation() {
     echo -e "${YELLOW}🔍 Überprüfe Dienste...${NC}"
     echo ""
     
-    # Status aller Dienste
     for service in postgresql redis-server mosquitto chirpstack; do
         if pct exec $LXC_CID -- systemctl is-active --quiet $service; then
             echo -e "${GREEN}✓ $service läuft${NC}"
         else
             echo -e "${RED}✗ $service läuft NICHT${NC}"
             if [ "$service" = "chirpstack" ]; then
-                echo -e "${YELLOW}Fehlerlog:${NC}"
-                pct exec $LXC_CID -- journalctl -u chirpstack -n 30 --no-pager | tail -20
+                echo -e "${YELLOW}Fehlerlog (letzte 20 Zeilen):${NC}"
+                pct exec $LXC_CID -- journalctl -u chirpstack -n 20 --no-pager
             fi
         fi
     done
     
     echo ""
     echo -e "${YELLOW}Port-Check:${NC}"
-    pct exec $LXC_CID -- bash -c "netstat -tlnp | grep -E ':(8080|5432|6379|1883)'" || echo -e "${YELLOW}Ports noch nicht offen${NC}"
+    pct exec $LXC_CID -- bash -c "netstat -tlnp 2>/dev/null | grep -E ':(8080|5432|6379|1883)' || echo 'Noch keine Ports offen'"
 }
 
 function finish_message() {
-    ACTUAL_IP=$(pct exec $LXC_CID -- hostname -I | awk '{print $1}')
+    ACTUAL_IP=$(pct exec $LXC_CID -- hostname -I 2>/dev/null | awk '{print $1}')
     
     if [[ -z "$ACTUAL_IP" ]]; then
         ACTUAL_IP="KEINE IP - Bitte prüfen!"
@@ -305,7 +309,15 @@ function finish_message() {
     echo -e "  ${GREEN}Alle Logs anzeigen:${NC}"
     echo -e "    ${BLUE}journalctl -u chirpstack -n 100${NC}"
     echo ""
+    echo -e "  ${GREEN}Datenbank testen:${NC}"
+    echo -e "    ${BLUE}sudo -u postgres psql -d chirpstack -c '\l'${NC}"
+    echo ""
     echo -e "${GREEN}╚════════════════════════════════════════════════════════════╝${NC}"
+    echo ""
+    echo -e "${YELLOW}💡 Falls Port 8080 nicht erreichbar ist:${NC}"
+    echo -e "   1. pct enter $LXC_CID"
+    echo -e "   2. systemctl status chirpstack"
+    echo -e "   3. journalctl -u chirpstack -n 50"
 }
 
 # --- Hauptprogramm ---
@@ -320,5 +332,5 @@ verify_installation
 finish_message
 
 echo ""
-echo -e "${GREEN}✅ Setup abgeschlossen! Teste jetzt: http://\$IP:8080${NC}"
+echo -e "${GREEN}✅ Setup abgeschlossen!${NC}"
 exit 0
