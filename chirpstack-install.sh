@@ -1,11 +1,10 @@
 #!/usr/bin/env bash
 #
-# Script Name: ChirpStack V4 Installer for Proxmox VE (LXC - Robust Storage Selection)
+# Script Name: ChirpStack V4 Installer for Proxmox VE (LXC - Final, Trust & Execute)
 # Author: Gemini
 # Date: 2025-12-16
-# Description: Creates a Debian 12 (Bookworm) LXC container. Handles problematic external storage errors.
-#              Asks the user to specify a Template Storage that supports 'vztmpl'.
-# GitHub: https://github.com/HatchetMan111/chirpstack-install.sh
+# Description: Creates a Debian 12 (Bookworm) LXC container. Uses fixed Proxmox standards 
+#              ('local' for templates, 'local-lvm' for RootFS) and avoids content checks.
 
 # --- Variablen und Konfiguration ---
 LXC_TEMPLATE_URL="https://community-templates.github.io/templates/debian-12-standard_12.5-1_amd64.tar.zst"
@@ -17,8 +16,9 @@ LXC_RAM_DEFAULT=1024
 LXC_CPU_DEFAULT=2
 LXC_DISK_DEFAULT=8
 
-# STANDARDS: local-lvm für die Root-Disk (fest), Template muss vom Benutzer gewählt werden
-LXC_STORAGE="local-lvm"
+# STANDARDS: Hier setzen wir die festen Werte, wie von Proxmox erwartet:
+LXC_STORAGE="local-lvm"      # <-- Container RootFS (muss rootdir unterstützen)
+LXC_TEMPLATE_STORAGE="local" # <-- Template Download (muss vztmpl unterstützen)
 LXC_VETH_BRIDGE="vmbr0"
 NET_CONFIG="ip=dhcp"    
 LXC_IP="dhcp"           
@@ -38,51 +38,10 @@ function check_root() {
     fi
 }
 
-function prompt_for_template_storage() {
-    echo -e "${YELLOW}--- Template Storage Konfiguration ---${NC}"
-    
-    # NEU: Liste nur Storages, die 'vztmpl' unterstützen, und unterdrücke Fehler
-    STORAGE_LIST=$(pvesm status --enabled 1 2>/dev/null | awk '
-        NR>1 {
-            if ($4 ~ /vztmpl/) {
-                print $1
-            }
-        }' | tr '\n' ' ')
-    
-    if [ -z "$STORAGE_LIST" ]; then
-        echo -e "${RED}Fehler: Es wurde kein aktiver Storage gefunden, der 'vztmpl' (Templates) unterstützt.${NC}"
-        echo -e "${YELLOW}Bitte aktivieren Sie 'VZTmpl' (Container Templates) in der Web-UI für einen Ihrer Storages (z.B. 'local').${NC}"
-        exit 1
-    fi
-
-    echo -e "${GREEN}Verfügbare Storages, die Templates speichern können:${NC}"
-    echo -e "${GREEN}[ $STORAGE_LIST ]${NC}"
-    
-    # Wir nehmen den ersten gefundenen Storage als Standard, falls verfügbar
-    LXC_TEMPLATE_STORAGE_DEFAULT=$(echo $STORAGE_LIST | awk '{print $1}')
-
-    read -rp "Storage für LXC Templates (muss 'vztmpl' unterstützen, Standard: $LXC_TEMPLATE_STORAGE_DEFAULT): " LXC_TEMPLATE_STORAGE_USER
-    LXC_TEMPLATE_STORAGE=${LXC_TEMPLATE_STORAGE_USER:-$LXC_TEMPLATE_STORAGE_DEFAULT}
-
-    # Überprüfung des Benutzer-Inputs
-    if ! echo $STORAGE_LIST | grep -w $LXC_TEMPLATE_STORAGE >/dev/null; then
-        echo -e "${RED}Fehler: Der gewählte Storage '$LXC_TEMPLATE_STORAGE' unterstützt nicht 'vztmpl' oder ist inaktiv.${NC}"
-        prompt_for_template_storage
-    fi
-    
-    # Zusätzliche Prüfung des RootFS Storage (local-lvm)
-    if ! pvesm status --enabled 1 2>/dev/null | grep -E "^$LXC_STORAGE\s" | awk '{print $4}' | grep -q 'rootdir'; then
-        echo -e "${RED}Fehler: Der RootFS-Storage '$LXC_STORAGE' existiert nicht, ist inaktiv oder unterstützt nicht 'rootdir'.${NC}"
-        exit 1
-    fi
-}
+# WICHTIG: Die Funktionen zur Storage-Prüfung sind hier NICHT enthalten.
 
 function prompt_for_config() {
     echo -e "${YELLOW}--- ChirpStack LXC Konfiguration ---${NC}"
-    
-    # NEU: Template Storage wird zuerst interaktiv abgefragt
-    prompt_for_template_storage
-
     echo -e "${GREEN}RootFS: $LXC_STORAGE, Templates: $LXC_TEMPLATE_STORAGE, Netzwerk: DHCP über $LXC_VETH_BRIDGE.${NC}"
 
     read -rp "LXC Container ID (Standard: $LXC_CID_DEFAULT): " LXC_CID
@@ -91,7 +50,6 @@ function prompt_for_config() {
         echo -e "${RED}Fehler: Container ID $LXC_CID ist bereits in Verwendung.${NC}"
         exit 1
     fi
-    # ... (Rest der Abfragen unverändert)
 
     read -rp "Hostname (Standard: $LXC_HOSTNAME_DEFAULT): " LXC_HOSTNAME
     LXC_HOSTNAME=${LXC_HOSTNAME:-$LXC_HOSTNAME_DEFAULT}
@@ -107,7 +65,7 @@ function prompt_for_config() {
     echo "Container ID: $LXC_CID"
     echo "Hostname: $LXC_HOSTNAME"
     echo "RootFS Storage: $LXC_STORAGE"
-    echo "Template Storage: $LXC_TEMPLATE_STORAGE" # Zeigt den gewählten Template Storage
+    echo "Template Storage: $LXC_TEMPLATE_STORAGE"
     echo "IP-Adresse: $LXC_IP (DHCP)"
     echo "Ressourcen: ${LXC_CPU}x CPU, ${LXC_RAM}MB RAM, ${LXC_DISK}GB Disk"
     echo "-----------------------"
@@ -122,12 +80,15 @@ function prompt_for_config() {
 function download_template() {
     echo -e "${GREEN}Lade LXC-Template ($LXC_TEMPLATE_NAME) herunter...${NC}"
     
-    # Template-Check und Download verwenden den vom Benutzer gewählten Template-Storage
-    pveam list $LXC_TEMPLATE_STORAGE | grep "$LXC_TEMPLATE_NAME" >/dev/null 
+    # Template-Check und Download verwenden den korrekten Template-Storage
+    pveam list $LXC_TEMPLATE_STORAGE 2>/dev/null | grep "$LXC_TEMPLATE_NAME" >/dev/null 
     if [ $? -ne 0 ]; then
         echo -e "${YELLOW}Template nicht im Cache gefunden. Lade in '$LXC_TEMPLATE_STORAGE' herunter von: $LXC_TEMPLATE_URL${NC}"
+        
+        # Ausführen des Downloads. Der Fehlerhinweis wird sehr spezifisch.
         pveam download $LXC_TEMPLATE_STORAGE $LXC_TEMPLATE_URL || {
-            echo -e "${RED}Fehler beim Herunterladen des Templates. Prüfen Sie, ob '$LXC_TEMPLATE_STORAGE' aktiv ist und 'vztmpl' unterstützt.${NC}"
+            echo -e "${RED}Fehler beim Herunterladen des Templates.${NC}"
+            echo -e "${RED}Bitte stellen Sie sicher, dass '$LXC_TEMPLATE_STORAGE' (local) in der Proxmox Web-UI 'Container Templates' ('vztmpl') unterstützt.${NC}"
             exit 1
         }
     else
@@ -154,6 +115,7 @@ function create_lxc() {
 
     if [ $? -ne 0 ]; then
         echo -e "${RED}Fehler bei der Erstellung des Containers.${NC}"
+        echo -e "${YELLOW}Möglicher Fehler: Der Storage '$LXC_STORAGE' (local-lvm) unterstützt kein 'rootdir', oder die Ressourcen sind unzureichend.${NC}"
         exit 1
     fi
 
@@ -162,7 +124,6 @@ function create_lxc() {
 }
 
 function install_chirpstack() {
-    # ... (Unveränderter Installations-Teil)
     echo -e "${GREEN}Starte ChirpStack Installation im Container...${NC}"
 
     pct exec $LXC_CID -- bash -c "apt update && apt upgrade -y"
