@@ -1,24 +1,21 @@
 #!/usr/bin/env bash
 #
-# Script Name: ChirpStack V4 Installer for Proxmox VE (LXC - Final, Trust & Execute)
-# Author: Gemini
+# Script Name: ChirpStack V4 Installer for Proxmox VE (LXC - Enhanced)
+# Author: Enhanced Version
 # Date: 2025-12-16
-# Description: Creates a Debian 12 (Bookworm) LXC container. Uses fixed Proxmox standards 
-#              ('local' for templates, 'local-lvm' for RootFS) and avoids content checks.
+# Description: Creates a Debian 12 (Bookworm) LXC container with automatic storage detection
+
+set -e
 
 # --- Variablen und Konfiguration ---
-LXC_TEMPLATE_URL="https://community-templates.github.io/templates/debian-12-standard_12.5-1_amd64.tar.zst"
-LXC_TEMPLATE_NAME="debian-12-standard"
+LXC_TEMPLATE_URL="http://download.proxmox.com/images/system/debian-12-standard_12.7-1_amd64.tar.zst"
+LXC_TEMPLATE_NAME="debian-12-standard_12.7-1_amd64.tar.zst"
 DB_PASS="dbpassword" 
 LXC_CID_DEFAULT=900
 LXC_HOSTNAME_DEFAULT="chirpstack"
-LXC_RAM_DEFAULT=1024
+LXC_RAM_DEFAULT=2048
 LXC_CPU_DEFAULT=2
-LXC_DISK_DEFAULT=8
-
-# STANDARDS: Hier setzen wir die festen Werte, wie von Proxmox erwartet:
-LXC_STORAGE="local-lvm"      # <-- Container RootFS (muss rootdir unterstützen)
-LXC_TEMPLATE_STORAGE="local" # <-- Template Download (muss vztmpl unterstützen)
+LXC_DISK_DEFAULT=10
 LXC_VETH_BRIDGE="vmbr0"
 NET_CONFIG="ip=dhcp"    
 LXC_IP="dhcp"           
@@ -27,27 +24,75 @@ LXC_IP="dhcp"
 RED='\033[0;31m'
 GREEN='\033[0;32m'
 YELLOW='\033[0;33m'
+BLUE='\033[0;34m'
 NC='\033[0m'
 
 # --- Funktionen ---
 
+function print_header() {
+    echo -e "${BLUE}╔════════════════════════════════════════════════════════════╗${NC}"
+    echo -e "${BLUE}║     ChirpStack V4 Installer für Proxmox VE (LXC)          ║${NC}"
+    echo -e "${BLUE}╚════════════════════════════════════════════════════════════╝${NC}"
+    echo ""
+}
+
 function check_root() {
     if [[ $EUID -ne 0 ]]; then
-        echo -e "${RED}Fehler: Dieses Skript muss als root ausgeführt werden.${NC}"
+        echo -e "${RED}❌ Fehler: Dieses Skript muss als root ausgeführt werden.${NC}"
         exit 1
     fi
 }
 
-# WICHTIG: Die Funktionen zur Storage-Prüfung sind hier NICHT enthalten.
+function detect_storages() {
+    echo -e "${YELLOW}🔍 Erkenne verfügbare Storages...${NC}"
+    
+    # Finde Storage für Templates (muss vztmpl Content-Type unterstützen)
+    LXC_TEMPLATE_STORAGE=$(pvesm status -content vztmpl | awk 'NR>1 {print $1}' | head -n1)
+    
+    if [[ -z "$LXC_TEMPLATE_STORAGE" ]]; then
+        echo -e "${RED}❌ Kein Storage mit 'vztmpl' Content-Type gefunden!${NC}"
+        echo -e "${YELLOW}Verfügbare Storages:${NC}"
+        pvesm status
+        exit 1
+    fi
+    
+    # Finde Storage für Container (muss rootdir Content-Type unterstützen)
+    LXC_STORAGE=$(pvesm status -content rootdir | awk 'NR>1 {print $1}' | head -n1)
+    
+    if [[ -z "$LXC_STORAGE" ]]; then
+        echo -e "${RED}❌ Kein Storage mit 'rootdir' Content-Type gefunden!${NC}"
+        echo -e "${YELLOW}Verfügbare Storages:${NC}"
+        pvesm status
+        exit 1
+    fi
+    
+    echo -e "${GREEN}✓ Template Storage: $LXC_TEMPLATE_STORAGE${NC}"
+    echo -e "${GREEN}✓ Container Storage: $LXC_STORAGE${NC}"
+    echo ""
+}
+
+function check_bridge() {
+    if ! ip link show $LXC_VETH_BRIDGE &> /dev/null; then
+        echo -e "${YELLOW}⚠ Bridge '$LXC_VETH_BRIDGE' nicht gefunden. Verfügbare Bridges:${NC}"
+        ip link show | grep -E "^[0-9]+: vmbr" | awk '{print $2}' | sed 's/:$//'
+        read -rp "Bridge-Name eingeben (oder Enter für $LXC_VETH_BRIDGE): " CUSTOM_BRIDGE
+        if [[ -n "$CUSTOM_BRIDGE" ]]; then
+            LXC_VETH_BRIDGE="$CUSTOM_BRIDGE"
+        fi
+    fi
+}
 
 function prompt_for_config() {
-    echo -e "${YELLOW}--- ChirpStack LXC Konfiguration ---${NC}"
-    echo -e "${GREEN}RootFS: $LXC_STORAGE, Templates: $LXC_TEMPLATE_STORAGE, Netzwerk: DHCP über $LXC_VETH_BRIDGE.${NC}"
+    echo -e "${YELLOW}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+    echo -e "${YELLOW}                  Container Konfiguration${NC}"
+    echo -e "${YELLOW}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+    echo ""
 
-    read -rp "LXC Container ID (Standard: $LXC_CID_DEFAULT): " LXC_CID
+    read -rp "Container ID (Standard: $LXC_CID_DEFAULT): " LXC_CID
     LXC_CID=${LXC_CID:-$LXC_CID_DEFAULT}
+    
     if pct status $LXC_CID &> /dev/null; then
-        echo -e "${RED}Fehler: Container ID $LXC_CID ist bereits in Verwendung.${NC}"
+        echo -e "${RED}❌ Fehler: Container ID $LXC_CID ist bereits in Verwendung.${NC}"
         exit 1
     fi
 
@@ -56,110 +101,228 @@ function prompt_for_config() {
 
     read -rp "Speichergröße in GB (Standard: $LXC_DISK_DEFAULT): " LXC_DISK
     LXC_DISK=${LXC_DISK:-$LXC_DISK_DEFAULT}
+    
     read -rp "Arbeitsspeicher in MB (Standard: $LXC_RAM_DEFAULT): " LXC_RAM
     LXC_RAM=${LXC_RAM:-$LXC_RAM_DEFAULT}
+    
     read -rp "CPU-Kerne (Standard: $LXC_CPU_DEFAULT): " LXC_CPU
     LXC_CPU=${LXC_CPU:-$LXC_CPU_DEFAULT}
     
-    echo -e "${GREEN}--- Zusammenfassung ---${NC}"
-    echo "Container ID: $LXC_CID"
-    echo "Hostname: $LXC_HOSTNAME"
-    echo "RootFS Storage: $LXC_STORAGE"
-    echo "Template Storage: $LXC_TEMPLATE_STORAGE"
-    echo "IP-Adresse: $LXC_IP (DHCP)"
-    echo "Ressourcen: ${LXC_CPU}x CPU, ${LXC_RAM}MB RAM, ${LXC_DISK}GB Disk"
-    echo "-----------------------"
-    read -rp "Bestätigen Sie die Konfiguration und starten Sie die Installation (j/n)? " -n 1 -r
+    read -rp "Datenbank-Passwort (Standard: $DB_PASS): " CUSTOM_DB_PASS
+    if [[ -n "$CUSTOM_DB_PASS" ]]; then
+        DB_PASS="$CUSTOM_DB_PASS"
+    fi
+    
+    echo ""
+    echo -e "${GREEN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+    echo -e "${GREEN}                    Zusammenfassung${NC}"
+    echo -e "${GREEN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+    echo -e "  Container ID:        ${BLUE}$LXC_CID${NC}"
+    echo -e "  Hostname:            ${BLUE}$LXC_HOSTNAME${NC}"
+    echo -e "  Template Storage:    ${BLUE}$LXC_TEMPLATE_STORAGE${NC}"
+    echo -e "  Container Storage:   ${BLUE}$LXC_STORAGE${NC}"
+    echo -e "  Netzwerk Bridge:     ${BLUE}$LXC_VETH_BRIDGE${NC}"
+    echo -e "  IP-Konfiguration:    ${BLUE}$LXC_IP${NC}"
+    echo -e "  CPU-Kerne:           ${BLUE}$LXC_CPU${NC}"
+    echo -e "  RAM:                 ${BLUE}${LXC_RAM}MB${NC}"
+    echo -e "  Festplatte:          ${BLUE}${LXC_DISK}GB${NC}"
+    echo -e "${GREEN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+    echo ""
+    read -rp "Installation starten? (j/N): " -n 1 -r
     echo
-    if [[ ! $REPLY =~ ^[Jj]$ ]]; then
+    if [[ ! $REPLY =~ ^[JjYy]$ ]]; then
         echo -e "${RED}Installation abgebrochen.${NC}"
         exit 1
     fi
 }
 
 function download_template() {
-    echo -e "${GREEN}Lade LXC-Template ($LXC_TEMPLATE_NAME) herunter...${NC}"
+    echo ""
+    echo -e "${GREEN}📥 Lade LXC-Template herunter...${NC}"
     
-    # Template-Check und Download verwenden den korrekten Template-Storage
-    pveam list $LXC_TEMPLATE_STORAGE 2>/dev/null | grep "$LXC_TEMPLATE_NAME" >/dev/null 
-    if [ $? -ne 0 ]; then
-        echo -e "${YELLOW}Template nicht im Cache gefunden. Lade in '$LXC_TEMPLATE_STORAGE' herunter von: $LXC_TEMPLATE_URL${NC}"
-        
-        # Ausführen des Downloads. Der Fehlerhinweis wird sehr spezifisch.
-        pveam download $LXC_TEMPLATE_STORAGE $LXC_TEMPLATE_URL || {
-            echo -e "${RED}Fehler beim Herunterladen des Templates.${NC}"
-            echo -e "${RED}Bitte stellen Sie sicher, dass '$LXC_TEMPLATE_STORAGE' (local) in der Proxmox Web-UI 'Container Templates' ('vztmpl') unterstützt.${NC}"
-            exit 1
-        }
-    else
-        echo -e "${GREEN}Template ist bereits im Cache vorhanden auf '$LXC_TEMPLATE_STORAGE'.${NC}"
+    TEMPLATE_PATH="$LXC_TEMPLATE_STORAGE:vztmpl/$LXC_TEMPLATE_NAME"
+    
+    # Prüfe ob Template bereits existiert
+    if pvesm list $LXC_TEMPLATE_STORAGE | grep -q "$LXC_TEMPLATE_NAME"; then
+        echo -e "${GREEN}✓ Template bereits vorhanden: $LXC_TEMPLATE_NAME${NC}"
+        return 0
     fi
+    
+    echo -e "${YELLOW}⏳ Lade Template von: $LXC_TEMPLATE_URL${NC}"
+    
+    # Template herunterladen
+    cd /var/lib/vz/template/cache 2>/dev/null || mkdir -p /var/lib/vz/template/cache && cd /var/lib/vz/template/cache
+    
+    wget -q --show-progress "$LXC_TEMPLATE_URL" -O "$LXC_TEMPLATE_NAME" || {
+        echo -e "${RED}❌ Fehler beim Download des Templates.${NC}"
+        exit 1
+    }
+    
+    echo -e "${GREEN}✓ Template erfolgreich heruntergeladen${NC}"
 }
 
 function create_lxc() {
-    echo -e "${GREEN}Erstelle LXC Container $LXC_CID (${LXC_HOSTNAME})...${NC}"
+    echo ""
+    echo -e "${GREEN}🔧 Erstelle LXC Container $LXC_CID...${NC}"
 
-    # Template-Pfad verwendet $LXC_TEMPLATE_STORAGE, RootFS verwendet $LXC_STORAGE
-    pct create $LXC_CID $LXC_TEMPLATE_STORAGE:vztmpl/$LXC_TEMPLATE_NAME.tar.zst \
-        --hostname $LXC_HOSTNAME \
-        --cores $LXC_CPU \
-        --memory $LXC_RAM \
-        --rootfs $LXC_STORAGE:$LXC_DISK \
-        --swap 0 \
-        --unprivileged 0 \
-        --net0 name=eth0,bridge=$LXC_VETH_BRIDGE,$NET_CONFIG,type=veth \
-        --features nesting=1 \
+    TEMPLATE_PATH="$LXC_TEMPLATE_STORAGE:vztmpl/$LXC_TEMPLATE_NAME"
+    
+    pct create $LXC_CID "$TEMPLATE_PATH" \
+        --hostname "$LXC_HOSTNAME" \
+        --cores "$LXC_CPU" \
+        --memory "$LXC_RAM" \
+        --rootfs "$LXC_STORAGE:$LXC_DISK" \
+        --swap 512 \
+        --unprivileged 1 \
+        --net0 "name=eth0,bridge=$LXC_VETH_BRIDGE,$NET_CONFIG,type=veth,firewall=1" \
+        --features "nesting=1" \
         --ostype debian \
-        --onboot 1 \
-        --start 1
-
-    if [ $? -ne 0 ]; then
-        echo -e "${RED}Fehler bei der Erstellung des Containers.${NC}"
-        echo -e "${YELLOW}Möglicher Fehler: Der Storage '$LXC_STORAGE' (local-lvm) unterstützt kein 'rootdir', oder die Ressourcen sind unzureichend.${NC}"
+        --onboot 1 || {
+        echo -e "${RED}❌ Fehler bei der Container-Erstellung.${NC}"
         exit 1
-    fi
+    }
 
-    echo -e "${YELLOW}Warte, bis der Container gestartet ist und eine IP per DHCP zugewiesen wurde (ca. 15s)...${NC}"
-    sleep 15
+    echo -e "${GREEN}✓ Container erstellt${NC}"
+    echo -e "${YELLOW}⏳ Starte Container...${NC}"
+    
+    pct start $LXC_CID || {
+        echo -e "${RED}❌ Fehler beim Starten des Containers.${NC}"
+        exit 1
+    }
+    
+    echo -e "${YELLOW}⏳ Warte auf Container-Start und DHCP (20s)...${NC}"
+    sleep 20
+}
+
+function wait_for_network() {
+    echo -e "${YELLOW}⏳ Warte auf Netzwerkkonnektivität...${NC}"
+    
+    for i in {1..30}; do
+        if pct exec $LXC_CID -- ping -c1 8.8.8.8 &>/dev/null; then
+            echo -e "${GREEN}✓ Netzwerk verfügbar${NC}"
+            return 0
+        fi
+        sleep 2
+    done
+    
+    echo -e "${YELLOW}⚠ Netzwerk-Timeout, fahre trotzdem fort...${NC}"
 }
 
 function install_chirpstack() {
-    echo -e "${GREEN}Starte ChirpStack Installation im Container...${NC}"
+    echo ""
+    echo -e "${GREEN}📦 Installiere ChirpStack V4...${NC}"
+    echo ""
 
-    pct exec $LXC_CID -- bash -c "apt update && apt upgrade -y"
-    pct exec $LXC_CID -- bash -c "DEBIAN_FRONTEND=noninteractive apt install -y wget curl gnupg postgresql postgresql-contrib redis-server"
+    echo -e "${YELLOW}[1/8] System-Update...${NC}"
+    pct exec $LXC_CID -- bash -c "apt-get update && DEBIAN_FRONTEND=noninteractive apt-get upgrade -y"
+    
+    echo -e "${YELLOW}[2/8] Installiere Basis-Pakete...${NC}"
+    pct exec $LXC_CID -- bash -c "DEBIAN_FRONTEND=noninteractive apt-get install -y wget curl gnupg2 apt-transport-https ca-certificates"
+    
+    echo -e "${YELLOW}[3/8] Installiere PostgreSQL und Redis...${NC}"
+    pct exec $LXC_CID -- bash -c "DEBIAN_FRONTEND=noninteractive apt-get install -y postgresql postgresql-contrib redis-server"
+    
+    echo -e "${YELLOW}[4/8] Füge ChirpStack Repository hinzu...${NC}"
     pct exec $LXC_CID -- bash -c "mkdir -p /etc/apt/keyrings/"
-    pct exec $LXC_CID -- bash -c "wget -q -O - https://artifacts.chirpstack.io/packages/chirpstack.key | gpg --dearmor > /etc/apt/keyrings/chirpstack.gpg"
-    pct exec $LXC_CID -- bash -c "echo \"deb [signed-by=/etc/apt/keyrings/chirpstack.gpg] https://artifacts.chirpstack.io/packages/4.x/deb stable main\" | tee /etc/apt/sources.list.d/chirpstack.list"
-    pct exec $LXC_CID -- bash -c "apt update"
-    pct exec $LXC_CID -- bash -c "DEBIAN_FRONTEND=noninteractive apt install -y chirpstack mosquitto"
-    pct exec $LXC_CID -- bash -c "sudo -u postgres psql -c \"CREATE USER chirpstack WITH PASSWORD '$DB_PASS';\""
+    pct exec $LXC_CID -- bash -c "curl -fsSL https://artifacts.chirpstack.io/packages/4.x/deb/pubkey.gpg | gpg --dearmor -o /etc/apt/keyrings/chirpstack.gpg"
+    pct exec $LXC_CID -- bash -c "echo 'deb [signed-by=/etc/apt/keyrings/chirpstack.gpg] https://artifacts.chirpstack.io/packages/4.x/deb stable main' | tee /etc/apt/sources.list.d/chirpstack.list"
+    
+    echo -e "${YELLOW}[5/8] Aktualisiere Paketliste...${NC}"
+    pct exec $LXC_CID -- bash -c "apt-get update"
+    
+    echo -e "${YELLOW}[6/8] Installiere ChirpStack und Mosquitto...${NC}"
+    pct exec $LXC_CID -- bash -c "DEBIAN_FRONTEND=noninteractive apt-get install -y chirpstack mosquitto mosquitto-clients"
+    
+    echo -e "${YELLOW}[7/8] Konfiguriere Datenbank...${NC}"
+    pct exec $LXC_CID -- bash -c "sudo -u postgres psql -c \"CREATE ROLE chirpstack WITH LOGIN PASSWORD '$DB_PASS';\""
     pct exec $LXC_CID -- bash -c "sudo -u postgres psql -c \"CREATE DATABASE chirpstack WITH OWNER chirpstack;\""
-    pct exec $LXC_CID -- bash -c "sed -i 's/^dsn=.*$/dsn=\"postgres:\/\/chirpstack:$DB_PASS@localhost\/chirpstack?sslmode=disable\"/' /etc/chirpstack/chirpstack.toml"
-    pct exec $LXC_CID -- bash -c "systemctl enable postgresql redis chirpstack mosquitto"
-    pct exec $LXC_CID -- bash -c "systemctl start postgresql redis chirpstack mosquitto"
+    pct exec $LXC_CID -- bash -c "sudo -u postgres psql -c \"GRANT ALL PRIVILEGES ON DATABASE chirpstack TO chirpstack;\""
+    
+    echo -e "${YELLOW}[8/8] Konfiguriere ChirpStack...${NC}"
+    pct exec $LXC_CID -- bash -c "sed -i 's|dsn=.*|dsn=\"postgres://chirpstack:$DB_PASS@localhost/chirpstack?sslmode=disable\"|' /etc/chirpstack/chirpstack.toml"
+    
+    echo -e "${YELLOW}Starte Dienste...${NC}"
+    pct exec $LXC_CID -- bash -c "systemctl enable postgresql redis-server chirpstack mosquitto"
+    pct exec $LXC_CID -- bash -c "systemctl restart postgresql redis-server"
+    sleep 3
+    pct exec $LXC_CID -- bash -c "systemctl restart chirpstack mosquitto"
+    
+    sleep 5
+    
+    echo ""
+    echo -e "${GREEN}✓ ChirpStack Installation abgeschlossen!${NC}"
+}
 
-    echo -e "${GREEN}Installation von ChirpStack V4 abgeschlossen!${NC}"
+function verify_installation() {
+    echo ""
+    echo -e "${YELLOW}🔍 Überprüfe Installation...${NC}"
+    
+    if pct exec $LXC_CID -- systemctl is-active --quiet chirpstack; then
+        echo -e "${GREEN}✓ ChirpStack läuft${NC}"
+    else
+        echo -e "${RED}✗ ChirpStack läuft nicht${NC}"
+    fi
+    
+    if pct exec $LXC_CID -- systemctl is-active --quiet mosquitto; then
+        echo -e "${GREEN}✓ Mosquitto läuft${NC}"
+    else
+        echo -e "${RED}✗ Mosquitto läuft nicht${NC}"
+    fi
+    
+    if pct exec $LXC_CID -- systemctl is-active --quiet postgresql; then
+        echo -e "${GREEN}✓ PostgreSQL läuft${NC}"
+    else
+        echo -e "${RED}✗ PostgreSQL läuft nicht${NC}"
+    fi
 }
 
 function finish_message() {
-    ACTUAL_IP=$(pct exec $LXC_CID ip a show eth0 | grep 'inet ' | awk '{print $2}' | cut -d/ -f1)
-
-    echo -e "${GREEN}================================================================${NC}"
-    echo -e "${GREEN}🎉 ChirpStack V4 ist in Container $LXC_CID installiert!${NC}"
-    echo -e "${GREEN}Hostname: $LXC_HOSTNAME${NC}"
-    echo -e "${GREEN}Zugewiesene IP-Adresse: $ACTUAL_IP${NC}"
-    echo -e "${GREEN}Weboberfläche (Standard): http://$ACTUAL_IP:8080${NC}"
-    echo -e "${YELLOW}--- WICHTIG ---${NC}"
-    echo -e "${YELLOW}Das PostgreSQL-Passwort ist '$DB_PASS'. Ändern Sie dies SOFORT im Container!${NC}"
-    echo -e "${YELLOW}Login Web UI: admin / admin${NC}"
-    echo -e "${GREEN}================================================================${NC}"
+    ACTUAL_IP=$(pct exec $LXC_CID -- ip -4 addr show eth0 | grep -oP '(?<=inet\s)\d+(\.\d+){3}' | head -n1)
+    
+    if [[ -z "$ACTUAL_IP" ]]; then
+        ACTUAL_IP="Keine IP gefunden - bitte prüfen!"
+    fi
+    
+    echo ""
+    echo -e "${GREEN}╔════════════════════════════════════════════════════════════╗${NC}"
+    echo -e "${GREEN}║                  🎉 Installation Erfolgreich!              ║${NC}"
+    echo -e "${GREEN}╚════════════════════════════════════════════════════════════╝${NC}"
+    echo ""
+    echo -e "  📦 Container ID:          ${BLUE}$LXC_CID${NC}"
+    echo -e "  🏷️  Hostname:              ${BLUE}$LXC_HOSTNAME${NC}"
+    echo -e "  🌐 IP-Adresse:            ${BLUE}$ACTUAL_IP${NC}"
+    echo -e "  🔗 Web-Interface:         ${BLUE}http://$ACTUAL_IP:8080${NC}"
+    echo ""
+    echo -e "${YELLOW}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+    echo -e "${YELLOW}                     Login-Daten${NC}"
+    echo -e "${YELLOW}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+    echo -e "  Web-UI:     ${BLUE}admin${NC} / ${BLUE}admin${NC}"
+    echo -e "  Datenbank:  ${BLUE}chirpstack${NC} / ${BLUE}$DB_PASS${NC}"
+    echo ""
+    echo -e "${RED}⚠️  WICHTIG: Ändern Sie die Standardpasswörter!${NC}"
+    echo ""
+    echo -e "${YELLOW}Nützliche Befehle:${NC}"
+    echo -e "  pct enter $LXC_CID              # Container betreten"
+    echo -e "  pct stop $LXC_CID               # Container stoppen"
+    echo -e "  pct start $LXC_CID              # Container starten"
+    echo -e "  journalctl -u chirpstack -f     # Logs anzeigen (im Container)"
+    echo ""
+    echo -e "${GREEN}╚════════════════════════════════════════════════════════════╝${NC}"
 }
 
 # --- Hauptlogik ---
+print_header
 check_root
+detect_storages
+check_bridge
 prompt_for_config
 download_template
 create_lxc
+wait_for_network
 install_chirpstack
+verify_installation
 finish_message
+
+echo ""
+echo -e "${GREEN}✅ Setup abgeschlossen!${NC}"
+exit 0
