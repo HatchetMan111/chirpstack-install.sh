@@ -4,7 +4,7 @@
 # Author: Gemini (inspired by Proxmox Helper Scripts)
 # Date: 2025-12-16
 # Description: Creates a Debian 12 (Bookworm) LXC container and installs ChirpStack V4.
-#              The container uses DHCP for network configuration.
+#              The container uses DHCP for network configuration, focusing on local-lvm.
 # GitHub: https://github.com/HatchetMan111/chirpstack-install.sh
 
 # --- Variablen und Konfiguration ---
@@ -16,6 +16,7 @@ LXC_HOSTNAME_DEFAULT="chirpstack"
 LXC_RAM_DEFAULT=1024
 LXC_CPU_DEFAULT=2
 LXC_DISK_DEFAULT=8
+LXC_STORAGE_DEFAULT="local-lvm" # NEU: Standard auf LVM gesetzt
 LXC_VETH_BRIDGE="vmbr0"
 NET_CONFIG="ip=dhcp"
 LXC_IP="dhcp"
@@ -35,36 +36,48 @@ function check_root() {
     fi
 }
 
-function prompt_for_storage() {
-    echo -e "${YELLOW}Verfügbare Storages (müssen 'rootdir' UND 'vztmpl' unterstützen):${NC}"
+function check_storage_content() {
+    local storage=$1
+    # Prüft, ob der Storage aktiv ist und die notwendigen Content-Typen unterstützt.
+    # pvesm status muss die Ausgabe für den Storage liefern.
+    local content_check=$(pvesm status --enabled 1 2>/dev/null | grep -E "^$storage\s" | awk '{print $4}')
     
-    # NEUE LOGIK: Fehler unterdrücken (2>/dev/null) und nur Storages mit beiden Content-Typen filtern.
-    STORAGE_LIST=$(pvesm status --enabled 1 2>/dev/null | awk '
-        NR>1 {
-            # Prüft, ob 'rootdir' (für das LXC RootFS) UND 'vztmpl' (für Templates) in den Content-Typen enthalten sind
-            if ($4 ~ /rootdir/ && $4 ~ /vztmpl/) {
-                print $1
-            }
-        }' | tr '\n' ' ')
-    
-    if [ -z "$STORAGE_LIST" ]; then
-        echo -e "${RED}Fehler: Es wurden keine funktionierenden, lokalen oder erreichbaren Storages gefunden, die 'rootdir' und 'vztmpl' unterstützen.${NC}"
-        echo -e "${YELLOW}Bitte stellen Sie sicher, dass mindestens ein Storage (z.B. 'local' oder 'local-lvm') diese Content-Typen in der Proxmox Web-UI aktiviert hat.${NC}"
-        exit 1
+    if [[ "$content_check" == "" ]]; then
+        echo -e "${RED}Fehler: Storage '$storage' existiert nicht oder ist nicht aktiv.${NC}"
+        return 1
     fi
 
-    echo -e "${GREEN}[ $STORAGE_LIST ]${NC}"
-    read -rp "Storage für LXC RootFS & Templates (Standard: $(echo $STORAGE_LIST | awk '{print $1}')): " LXC_STORAGE_USER
-    LXC_STORAGE=${LXC_STORAGE_USER:-$(echo $STORAGE_LIST | awk '{print $1}')}
+    if [[ "$content_check" != *"rootdir"* ]]; then
+        echo -e "${RED}Fehler: Storage '$storage' unterstützt nicht 'rootdir' (für das Container-Dateisystem).${NC}"
+        return 1
+    fi
 
-    if ! echo $STORAGE_LIST | grep -w $LXC_STORAGE >/dev/null; then
-        echo -e "${RED}Fehler: Der gewählte Storage '$LXC_STORAGE' ist ungültig oder unterstützt nicht die notwendigen Content-Typen.${NC}"
-        prompt_for_storage
+    if [[ "$content_check" != *"vztmpl"* ]]; then
+        echo -e "${RED}Fehler: Storage '$storage' unterstützt nicht 'vztmpl' (für Templates).${NC}"
+        return 1
+    fi
+    return 0
+}
+
+
+function prompt_for_storage() {
+    echo -e "${YELLOW}--- Storage Konfiguration ---${NC}"
+    
+    # 1. Benutzer fragen, Standard ist local-lvm
+    read -rp "Storage für LXC (muss 'rootdir' & 'vztmpl' unterstützen, Standard: $LXC_STORAGE_DEFAULT): " LXC_STORAGE_USER
+    LXC_STORAGE=${LXC_STORAGE_USER:-$LXC_STORAGE_DEFAULT}
+
+    # 2. Storage prüfen
+    if ! check_storage_content "$LXC_STORAGE"; then
+        echo -e "${RED}Der gewählte Storage '$LXC_STORAGE' ist ungültig. Bitte erneut versuchen.${NC}"
+        prompt_for_storage # Erneut fragen
     fi
 }
 
 function prompt_for_config() {
     echo -e "${YELLOW}--- ChirpStack LXC Konfiguration (Netzwerk: DHCP) ---${NC}"
+
+    # Storage wählen
     prompt_for_storage
 
     read -rp "LXC Container ID (Standard: $LXC_CID_DEFAULT): " LXC_CID
@@ -114,6 +127,7 @@ function download_template() {
         echo -e "${GREEN}Template ist bereits im Cache vorhanden.${NC}"
     fi
 }
+
 # ... (create_lxc, install_chirpstack, finish_message und Hauptlogik unverändert)
 function create_lxc() {
     echo -e "${GREEN}Erstelle LXC Container $LXC_CID (${LXC_HOSTNAME})...${NC}"
