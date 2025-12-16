@@ -27,4 +27,4 @@ Führen Sie die folgenden Schritte direkt über SSH oder die Proxmox Shell aus.
 Verwenden Sie diesen **korrigierten** Befehl, um das Skript direkt von Ihrem GitHub-Repository herunterzuladen:
 
 ```bash
-wget -qO chirpstack-install.sh [https://raw.githubusercontent.com/HatchetMan111/chirpstack-install.sh/main/chirpstack-install.sh](https://raw.githubusercontent.com/HatchetMan111/chirpstack-install.sh/main/chirpstack-install.sh)
+wget -qO chirpstack-install.sh https://raw.githubusercontent.com/HatchetMan111/chirpstack-install.sh/main/chirpstack-install.sh
