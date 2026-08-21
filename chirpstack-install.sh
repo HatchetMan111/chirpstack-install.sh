@@ -19,6 +19,8 @@ set -euo pipefail
 readonly SCRIPT_VERSION="1.1.0"
 
 # --- Standardwerte ---
+DEFAULT_ROOT_PASS="proxmox"
+DEFAULT_DB_PASS="chirpstack_db_secure"
 LXC_CID_DEFAULT=900
 LXC_HOSTNAME_DEFAULT="chirpstack-v4"
 LXC_RAM_DEFAULT=2048
@@ -67,6 +69,13 @@ function validate_int() { # $1=Wert $2=Name $3=min $4=max
 function validate_hostname() {
     if ! [[ "$1" =~ ^[a-zA-Z0-9]([a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?$ ]]; then
         msg_err "Ungültiger Hostname: '$1' (nur Buchstaben, Zahlen, Bindestriche; max. 63 Zeichen)."
+    fi
+}
+
+function validate_password() {
+    # Nur sichere Zeichen: verhindert Bruch von SQL/TOML/DSN (keine ' " $ ` \ Leerzeichen)
+    if ! [[ "$1" =~ ^[A-Za-z0-9._-]{6,64}$ ]]; then
+        msg_err "Passwort darf nur Buchstaben, Zahlen und . _ - enthalten (6–64 Zeichen)."
     fi
 }
 
@@ -210,6 +219,15 @@ LXC_DISK="$READ_INPUT_RESULT"
 validate_int "$LXC_DISK" "Festplatte" 5 4096
 if (( LXC_DISK < 8 )); then msg_warn "Weniger als 8 GB Speicher wird nicht empfohlen."; fi
 
+# Passwörter (Standard-Defaults, per Eingabe änderbar)
+read_input "Passwort (Container Root)" "$DEFAULT_ROOT_PASS"
+ROOT_PASS="$READ_INPUT_RESULT"
+validate_password "$ROOT_PASS"
+
+read_input "Passwort (Postgres DB)" "$DEFAULT_DB_PASS"
+DB_PASS="$READ_INPUT_RESULT"
+validate_password "$DB_PASS"
+
 # Netzwerkmodus
 read -r -p "Netzwerk: (D)HCP oder (s)tatische IP? [D]: " net_mode
 net_mode="${net_mode:-D}"
@@ -242,9 +260,7 @@ else
     MQTT_EXPOSE=0
 fi
 
-# --- Sichere Zufalls-Passwörter generieren (keine Hardcoded-Defaults!) ---
-ROOT_PASS="$(openssl rand -hex 12)"
-DB_PASS="$(openssl rand -hex 16)"
+# API Secret bleibt automatisch generiert
 API_SECRET="$(openssl rand -base64 32)"
 
 # --- Zusammenfassung ---
@@ -261,7 +277,9 @@ echo ""
 echo -e "${BOLD}Zusammenfassung:${NC}"
 echo "  ID: $LXC_CID | Host: $LXC_HOSTNAME | CPU: $LXC_CPU | RAM: ${LXC_RAM}MB | Disk: ${LXC_DISK}GB"
 echo "  Netzwerk: $NET_DESC | Bridge: $LXC_BRIDGE | MQTT: $MQTT_DESC"
-echo "  Passwörter werden automatisch generiert und am Ende angezeigt."
+if [[ "$ROOT_PASS" == "$DEFAULT_ROOT_PASS" || "$DB_PASS" == "$DEFAULT_DB_PASS" ]]; then
+    msg_warn "Standard-Passwörter aktiv – bitte nach der Installation ändern!"
+fi
 echo ""
 read -r -p "Installation starten? [J/n]: " reply
 reply="${reply:-J}"

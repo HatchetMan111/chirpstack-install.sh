@@ -9,7 +9,7 @@ ChirpStack V4 ist ein Open-Source LoRaWAN Network Server für IoT-Anwendungen. D
 * Automatisches Herunterladen des aktuellsten Debian 12 Templates (korrekt über `pveam`, funktioniert mit **jedem** Storage)
 * Interaktive Auswahl von Template-/Container-Storage und Netzwerk-Bridge
 * Abfrage von Container ID, Hostname, Ressourcen und Netzwerk (**DHCP oder statische IP** mit Validierung)
-* **Sichere Zufalls-Passwörter** für Container-Root und PostgreSQL-Datenbank (keine Hardcoded-Defaults mehr)
+* Abfrage von Root- und PostgreSQL-Passwort mit **Standard-Defaults** (`proxmox` / `chirpstack_db_secure`) – beim Start frei änderbar
 * Automatische Generierung des ChirpStack API Secrets
 * Installation & Konfiguration von PostgreSQL (inkl. `pg_trgm` + `hstore` Extensions), Redis und Mosquitto
 * Optionale MQTT-Freigabe (Port 1883) für LoRaWAN-Gateways im Netzwerk
@@ -38,7 +38,7 @@ wget -qO chirpstack-install.sh https://raw.githubusercontent.com/HatchetMan111/c
 
 ### 2. Den Anweisungen folgen
 
-Das Skript fragt Storage, Bridge, Container ID, Hostname, Ressourcen und Netzwerkeinstellungen ab. Alle Passwörter werden automatisch generiert.
+Das Skript fragt Storage, Bridge, Container ID, Hostname, Ressourcen, Netzwerkeinstellungen und Passwörter ab (leere Eingabe = Standardwert).
 
 ## 🎉 Nach der Installation
 
@@ -60,6 +60,7 @@ Es sind **keine Zusatzschritte erforderlich**:
 
 ## 🔒 Sicherheitshinweise
 
+* ⚠️ **Standard-Passwörter ändern:** Die Defaults (`proxmox` / `chirpstack_db_secure`) sind öffentlich in diesem Repository sichtbar! Geben Sie bei der Installation eigene Passwörter ein oder ändern Sie die Passwörter spätestens nach der Installation (`pct enter <CTID>` → `passwd`).
 * **Standard-Login ändern:** Melden Sie sich umgehend unter `http://<IP>:8080` an und ändern Sie das Passwort des `admin`-Benutzers.
 * **MQTT ohne Authentifizierung:** Wenn Sie MQTT für Gateways freigeben, ist der Broker im LAN ohne Passwort erreichbar (üblich für LoRaWAN-Gateways, aber nur in vertrauenswürdigen Netzen verwenden!). Alternativ können Sie MQTT auf localhost beschränken und Gateways per UDP anbinden.
 * Alle generierten Zugangsdaten werden nur lokal in `/root/chirpstack-info-<CTID>.txt` abgelegt (nur Root lesbar).
